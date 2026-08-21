@@ -22,7 +22,7 @@ from scenarios.stress_engine import (
 
 st.set_page_config(
     page_title="SA Credit Risk Volatility Engine",
-    page_icon="🏦",
+    page_icon="bank",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -48,272 +48,232 @@ FORMAT_ZAR = lambda x: f"R{x:,.0f}" if x < 1e9 else f"R{x/1e9:,.2f}bn"
 FORMAT_PCT = lambda x: f"{x*100:.2f}%"
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def plot_stage_distribution(ifrs9):
-    s1 = ifrs9["stage_distribution"].get(1, 0)
-    s2 = ifrs9["stage_distribution"].get(2, 0)
-    s3 = ifrs9["stage_distribution"].get(3, 0)
-    total = max(s1 + s2 + s3, 1)
-
-    fig = make_subplots(rows=1, cols=2, specs=[[{"type": "domain"}, {"type": "xy"}]])
-    fig.add_trace(go.Pie(
-        labels=["Stage 1 (Performing)", "Stage 2 (SICR)", "Stage 3 (Credit Impaired)"],
-        values=[s1, s2, s3],
-        marker=dict(colors=[COLOR_SCHEME["Stage 1"], COLOR_SCHEME["Stage 2"], COLOR_SCHEME["Stage 3"]]),
-        textinfo="label+percent",
-        hole=0.4,
-    ), row=1, col=1)
-
-    s1e = ifrs9["ecl_by_stage"].get(1, 0)
-    s2e = ifrs9["ecl_by_stage"].get(2, 0)
-    s3e = ifrs9["ecl_by_stage"].get(3, 0)
-    fig.add_trace(go.Bar(
-        x=["Stage 1", "Stage 2", "Stage 3"],
-        y=[s1e / 1e9, s2e / 1e9, s3e / 1e9],
-        marker=dict(color=[COLOR_SCHEME["Stage 1"], COLOR_SCHEME["Stage 2"], COLOR_SCHEME["Stage 3"]]),
-        text=[f"R{s1e/1e9:,.2f}bn", f"R{s2e/1e9:,.2f}bn", f"R{s3e/1e9:,.2f}bn"],
-        textposition="outside",
-    ), row=1, col=2)
-
-    fig.update_layout(title_text="IFRS 9: Accounts vs ECL Distribution by Stage",
-                      template="plotly_white", height=420, showlegend=False)
-    fig.update_yaxes(title_text="ECL (R bn)", row=1, col=2)
-    return fig
+    stage_summary = pd.DataFrame({
+        "Stage": ["Stage 1", "Stage 2", "Stage 3"],
+        "Accounts": [
+            _safe_float(ifrs9.get("stage_distribution", {}).get(1, 0)),
+            _safe_float(ifrs9.get("stage_distribution", {}).get(2, 0)),
+            _safe_float(ifrs9.get("stage_distribution", {}).get(3, 0)),
+        ],
+        "ECL_bn": [
+            _safe_float(ifrs9.get("ecl_by_stage", {}).get(1, 0)) / 1e9,
+            _safe_float(ifrs9.get("ecl_by_stage", {}).get(2, 0)) / 1e9,
+            _safe_float(ifrs9.get("ecl_by_stage", {}).get(3, 0)) / 1e9,
+        ],
+    })
+    return stage_summary
 
 
 def plot_capital_waterfall(regcap):
-    pcts = regcap["capital_stack"]["percentages"]
-    items = [
-        ("CET1 Min", pcts["CET1 Min (Pillar 1)"], COLOR_SCHEME["CET1"]),
-        ("T1 Add", pcts["Tier1 Min (Pillar 1)"] - pcts["CET1 Min (Pillar 1)"], COLOR_SCHEME["AT1"]),
-        ("T2 Add", pcts["Total Cap Min (Pillar 1)"] - pcts["Tier1 Min (Pillar 1)"], COLOR_SCHEME["T2"]),
-        ("CCB", pcts["CCB (Capital Conservation)"], COLOR_SCHEME["CCB"]),
-        ("CCyB 2026", pcts["CCyB (Countercyclical 2026)"], COLOR_SCHEME["CCyB"]),
-        ("D-SIB", pcts["D-SIB Buffer"], COLOR_SCHEME["D-SIB"]),
-        ("HLA", pcts["HLA Buffer"], COLOR_SCHEME["HLA"]),
-        ("Pillar 2", pcts["Pillar 2 Add-on"], COLOR_SCHEME["Pillar 2"]),
+    pct_map = regcap.get("capital_stack", {}).get("percentages", {})
+    rows = [
+        ("CET1", _safe_float(pct_map.get("CET1 Min (Pillar 1)", 0.0), 0.0)),
+        ("Tier 1 Add-on", _safe_float(pct_map.get("Tier1 Min (Pillar 1)", 0.0), 0.0) - _safe_float(pct_map.get("CET1 Min (Pillar 1)", 0.0), 0.0)),
+        ("Total Capital Add-on", _safe_float(pct_map.get("Total Cap Min (Pillar 1)", 0.0), 0.0) - _safe_float(pct_map.get("Tier1 Min (Pillar 1)", 0.0), 0.0)),
+        ("CCB", _safe_float(pct_map.get("CCB (Capital Conservation)", 0.0), 0.0)),
+        ("CCyB", _safe_float(pct_map.get("CCyB (Countercyclical 2026)", 0.0), 0.0)),
+        ("D-SIB", _safe_float(pct_map.get("D-SIB Buffer", 0.0), 0.0)),
+        ("HLA", _safe_float(pct_map.get("HLA Buffer", 0.0), 0.0)),
+        ("Pillar 2", _safe_float(pct_map.get("Pillar 2 Add-on", 0.0), 0.0)),
     ]
-    labels = [x[0] for x in items]
-    values = [x[1] * 100 for x in items]
-    colors = [x[2] for x in items]
-
-    fig = go.Figure(go.Waterfall(
-        name="Capital Stack",
-        orientation="v",
-        measure=["absolute", "relative", "relative", "relative", "relative", "relative", "relative", "relative"],
-        x=labels,
-        y=values,
-        text=[f"{v:.2f}pp" for v in values],
-        textposition="outside",
-        decreasing=dict(marker=dict(color="#6baed6")),
-        increasing=dict(marker=dict(color=colors)),
-        totals=dict(marker=dict(color="#c7e9c0")),
-        connector=dict(line=dict(color="rgb(63, 63, 63)")),
-    ))
-    fig.add_hline(y=sum(values), line_dash="dash", line_color="red",
-                  annotation_text=f"Total Required: {sum(values):.2f}% RWA")
-    fig.update_layout(title_text="Capital Stack Waterfall: Pillar 1 → Buffers → Pillar 2 (SARB Reg 38)",
-                      template="plotly_white", height=480, yaxis_title="% of RWA")
-    return fig
+    return pd.DataFrame(rows, columns=["Component", "Share_of_RWA"]).assign(Share_of_RWA=lambda d: d["Share_of_RWA"] * 100)
 
 
 def plot_ecap_allocation(ecap):
-    comp = ecap["components"]
-    labels = list(comp.keys())
-    values = list(comp.values())
-    total = sum(values)
-    pcts = [v / max(total, 1) * 100 for v in values]
-    text = [f"{l}: R{v/1e9:,.2f}bn ({p:.1f}%)" for l, v, p in zip(labels, values, pcts)]
-
-    fig = go.Figure(data=[go.Sunburst(
-        labels=["Total ECap"] + labels,
-        parents=[""] + ["Total ECap"] * len(labels),
-        values=[total] + values,
-        branchvalues="total",
-        marker=dict(colors=["#f0f0f0", "#2e8b57", "#4682b4", "#ff7f0e", "#9467bd", "#d62728", "#ffbb78"]),
-        hovertext=["Total"] + text,
-    )])
-    fig.update_layout(
-        title_text=f"Economic Capital Allocation (Nedbank 2024 Benchmark) - Total: R{total/1e9:,.2f}bn",
-        template="plotly_white", height=500,
-    )
-    return fig
+    components = ecap.get("components", {})
+    df = pd.DataFrame({
+        "Component": list(components.keys()),
+        "Value": [float(v) for v in components.values()],
+    })
+    return df.sort_values("Value", ascending=False)
 
 
 def plot_loss_distribution(credit_mc, ecl_total):
-    losses = credit_mc["simulated_losses"] / 1e9
-    el = credit_mc["expected_loss"] / 1e9
-    var_999 = credit_mc["VaR"][0.999] / 1e9
-    es_999 = credit_mc["Expected_Shortfall"][0.999] / 1e9
-
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(x=losses, nbinsx=100, name="Portfolio Loss",
-                               marker=dict(color="#636EFA", opacity=0.75),
-                               histnorm="probability density"))
-    fig.add_vline(x=el, line_dash="dot", line_color="green",
-                  annotation_text=f"Expected Loss: R{el:,.2f}bn", annotation_position="top left")
-    fig.add_vline(x=var_999, line_dash="dash", line_color="orange",
-                  annotation_text=f"VaR 99.9%: R{var_999:,.2f}bn", annotation_position="top right")
-    fig.add_vline(x=es_999, line_dash="solid", line_color="red",
-                  annotation_text=f"ES 99.9%: R{es_999:,.2f}bn")
-
-    fig.update_layout(
-        title_text=f"Simulated Credit Loss Distribution ({credit_mc['n_sims']:,} sims, {credit_mc['copula_type']}-copula)",
-        xaxis_title="Portfolio Loss (R bn)", yaxis_title="Density",
-        template="plotly_white", height=450, showlegend=False,
-    )
-    return fig
+    losses = pd.Series(credit_mc.get("simulated_losses", []), dtype=float) / 1e9
+    loss_df = pd.DataFrame({"Portfolio Loss (R bn)": losses})
+    return loss_df
 
 
 def plot_propagation_path(result, result_severe=None):
-    scenarios = [("Base", result)]
-    if result_severe is not None:
-        scenarios.append(("Severe", result_severe))
-
     rows = []
-    for name, r in scenarios:
-        ead = r["ifrs9"]["ead_total"]
-        ecl = r["ifrs9"]["ecl_total"]
-        cr = r["regcap"]["total_rwa"]
-        ec = r["economic_capital"]["total_ecap"]
-        afr = r["coverage"]["main"]["AFR"]
-
-        rows.extend([
-            {"Scenario": name, "Step": "1. EAD Exposure", "Value": ead / 1e9},
-            {"Scenario": name, "Step": "2. IFRS 9 ECL", "Value": ecl / 1e9},
-            {"Scenario": name, "Step": "3. Total RWA", "Value": cr / 1e9},
-            {"Scenario": name, "Step": "4. Total ECap Req", "Value": ec / 1e9},
-            {"Scenario": name, "Step": "5. AFR Available", "Value": afr / 1e9},
-        ])
-
-    df = pd.DataFrame(rows)
-    fig = px.line(df, x="Step", y="Value", color="Scenario", markers=True,
-                  color_discrete_map={"Base": "#636EFA", "Severe": "#EF553B"})
-    fig.update_traces(line=dict(width=3))
-    fig.update_layout(
-        title_text="Shock Propagation: EAD → ECL → RWA → ECap → AFR Coverage",
-        yaxis_title="Amount (R bn)", template="plotly_white", height=450,
-    )
-    for _, row in df.iterrows():
-        fig.add_annotation(x=row["Step"], y=row["Value"], text=f"R{row['Value']:,.1f}bn",
-                           showarrow=False, yshift=10)
-    return fig
+    for name, r in [("Base", result)] + ([("Severe", result_severe)] if result_severe else []):
+        try:
+            rows.extend([
+                {"Scenario": name, "Step": "EAD", "Value": _safe_float(r.get("ifrs9", {}).get("ead_total", 0.0)) / 1e9},
+                {"Scenario": name, "Step": "IFRS 9 ECL", "Value": _safe_float(r.get("ifrs9", {}).get("ecl_total", 0.0)) / 1e9},
+                {"Scenario": name, "Step": "RWA", "Value": _safe_float(r.get("regcap", {}).get("total_rwa", 0.0)) / 1e9},
+                {"Scenario": name, "Step": "ECap", "Value": _safe_float(r.get("economic_capital", {}).get("total_ecap", 0.0)) / 1e9},
+                {"Scenario": name, "Step": "AFR", "Value": _safe_float(r.get("coverage", {}).get("main", {}).get("AFR", 0.0)) / 1e9},
+            ])
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
 
 
 def plot_coverage_erosion(coverage):
-    df = coverage["erosion_path"]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["Shock Intensity (x)"], y=df["Coverage Ratio"],
-                             mode="lines+markers", line=dict(color="#00CC96", width=3),
-                             name="Coverage Ratio"))
-    fig.add_hline(y=1.0, line_dash="dash", line_color="red",
-                  annotation_text="Minimum 100% Coverage", annotation_position="top left")
-    fig.add_hline(y=NEDBANK_ECAP_BENCHMARK_2024["afr_coverage_ratio"],
-                  line_dash="dot", line_color="blue",
-                  annotation_text="Nedbank 2024 Benchmark: 170%", annotation_position="bottom right")
-    fig.add_trace(go.Scatter(x=df["Shock Intensity (x)"], y=df["ECap Expansion %"],
-                             mode="lines", line=dict(color="#EF553B", dash="dash"),
-                             name="ECap Expansion % (RHS)", yaxis="y2"))
-    fig.add_trace(go.Scatter(x=df["Shock Intensity (x)"], y=df["AFR Erosion %"],
-                             mode="lines", line=dict(color="#636EFA", dash="dot"),
-                             name="AFR Erosion % (RHS)", yaxis="y2"))
-
-    fig.update_layout(
-        title_text="Coverage Ratio Erosion Under Increasing Stress Intensity",
-        template="plotly_white", height=460,
-        yaxis_title="AFR / ECap Coverage Ratio",
-        yaxis2=dict(title="% Change", overlaying="y", side="right"),
-        xaxis_title="Shock Intensity Multiplier",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    return fig
+    erosion_path = coverage.get("erosion_path")
+    if erosion_path is None or erosion_path.empty:
+        return pd.DataFrame({"Shock Intensity (x)": [1.0], "Coverage Ratio": [1.0], "ECap Expansion %": [0.0], "AFR Erosion %": [0.0]})
+    df = erosion_path.copy()
+    for col in ["Shock Intensity (x)", "Coverage Ratio", "ECap Expansion %", "AFR Erosion %"]:
+        if col not in df.columns:
+            df[col] = 0.0
+    return df[["Shock Intensity (x)", "Coverage Ratio", "ECap Expansion %", "AFR Erosion %"]]
 
 
 def plot_uncertainty_bands(uncertainty):
-    items = []
+    rows = []
     for metric, band in uncertainty.items():
         if "CAR" in metric or "Coverage" in metric:
             continue
-        c = band["central"]
-        lo = band["lower_95"]
-        hi = band["upper_95"]
-        mr = band["model_risk"]
-        items.append({
+        rows.append({
             "Metric": metric,
-            "Central (R bn)": c / 1e9,
-            "Lower 95%": lo / 1e9,
-            "Upper 95%": hi / 1e9,
-            "Model Risk (R bn)": mr / 1e9,
-            "95% Interval Width (R bn)": (hi - lo) / 1e9,
+            "Central (R bn)": _safe_float(band.get("central", 0.0)) / 1e9,
+            "Lower 95% (R bn)": _safe_float(band.get("lower_95", 0.0)) / 1e9,
+            "Upper 95% (R bn)": _safe_float(band.get("upper_95", 0.0)) / 1e9,
+            "Model Risk (R bn)": _safe_float(band.get("model_risk", 0.0)) / 1e9,
         })
-
-    df = pd.DataFrame(items)
-    fig = go.Figure()
-    for _, r in df.iterrows():
-        fig.add_trace(go.Scatter(
-            x=[r["Lower 95%"], r["Central (R bn)"], r["Upper 95%"]],
-            y=[r["Metric"], r["Metric"], r["Metric"]],
-            mode="lines+markers",
-            line=dict(color=COLOR_SCHEME["Economic Capital"], width=4),
-            marker=dict(size=[8, 12, 8], color=["#888", "#000", "#888"]),
-            showlegend=False,
-            name=r["Metric"],
-            hovertemplate=f"{r['Metric']}: 95% [{r['Lower 95%']:,.2f}, {r['Upper 95%']:,.2f}] bn<br>Central: R{r['Central (R bn)']:,.2f}bn",
-        ))
-    fig.update_layout(
-        title_text="Model Uncertainty: 95% Confidence Intervals + Model Risk Allocation",
-        xaxis_title="Amount (R bn)", template="plotly_white", height=400,
-    )
-    return fig, df
+    return pd.DataFrame(rows)
 
 
 def plot_benchmark_radar(bench_df, regcap_result):
-    banks = list(SA_BANK_BENCHMARKS_2024.keys())
-    categories = ["Total CAR", "CET1 Ratio", "Stage 1%", "Stage 2%", "Stage 3%", "ECap/RWA"]
-
-    engine_ratios = regcap_result["capital_ratios"]
-    engine_row = [engine_ratios["Total CAR"]] * len(categories)
-
-    fig = go.Figure()
-
-    for bank in banks:
-        b = SA_BANK_BENCHMARKS_2024[bank]
-        vals = [b["CAR"], b["CET1"], b["ECL_stage1_pct"], b["ECL_stage2_pct"], b["ECL_stage3_pct"], b["ECap_RWA"]]
-        fig.add_trace(go.Scatterpolar(r=vals, theta=categories, fill="toself", name=bank, opacity=0.4))
-
-    stage_ecl_pct = bench_df.iloc[0]
-    ecl_s1 = float(stage_ecl_pct["Stage 1 ECL %"].replace("%", "")) / 100
-    ecl_s2 = float(stage_ecl_pct["Stage 2 ECL %"].replace("%", "")) / 100
-    ecl_s3 = float(stage_ecl_pct["Stage 3 ECL %"].replace("%", "")) / 100
-    ecap_pct = NEDBANK_ECAP_BENCHMARK_2024["total_ecap_to_rwa"]
-    engine_vals = [engine_ratios["Total CAR"], engine_ratios["CET1 Ratio"], ecl_s1, ecl_s2, ecl_s3, ecap_pct]
-    fig.add_trace(go.Scatterpolar(r=engine_vals, theta=categories, fill="toself",
-                                   name="Engine Output", line=dict(color="#EF553B", width=3)))
-
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 0.35])),
-        title_text="SA Bank Benchmark Comparison: Engine vs Top 5 D-SIBs (2024 Pillar 3)",
-        template="plotly_white", height=520,
-    )
-    return fig
+    if bench_df is None or bench_df.empty:
+        return pd.DataFrame({"Metric": ["Total CAR", "CET1 Ratio"], "Value": [0.0, 0.0]})
+    return bench_df.copy()
 
 
 def main():
     st.markdown(
         """
         <style>
-        .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 95% !important;}
-        h1 {color: #1a365d;}
-        h2 {color: #2c5282; border-bottom: 2px solid #cbd5e0; padding-bottom: 0.3rem;}
-        .metric-container {background: #f7fafc; padding: 1rem; border-radius: 0.6rem; border-left: 4px solid #3182ce;}
+        :root {
+            --page-bg: #f3f6fb;
+            --panel-bg: rgba(255,255,255,0.88);
+            --panel-border: #dfe7f5;
+            --ink: #10233b;
+            --muted: #475569;
+            --primary: #1d4ed8;
+            --primary-soft: #dbeafe;
+            --success: #0f766e;
+            --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+        }
+
+        .stApp {
+            background: linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+        }
+        .block-container {
+            padding-top: 0.8rem !important;
+            padding-bottom: 2rem !important;
+            max-width: 1500px !important;
+        }
+        h1 {
+            color: var(--ink);
+            font-size: 2.2rem !important;
+            margin-bottom: 0.15rem !important;
+            letter-spacing: -0.04em;
+        }
+        h2 {
+            color: #1f3b66;
+            border-bottom: 1px solid #dbe3f0;
+            padding-bottom: 0.35rem;
+            margin-top: 1.2rem !important;
+            margin-bottom: 0.8rem !important;
+            font-size: 1.15rem !important;
+            letter-spacing: 0.01em;
+        }
+        .stTabs [role="tablist"] {
+            gap: 0.45rem;
+            border-bottom: 1px solid #dbe3f0;
+            margin-bottom: 0.8rem;
+        }
+        .stTabs [role="tab"] {
+            border-radius: 0.75rem 0.75rem 0 0;
+            background: #edf2fb;
+            color: var(--muted);
+            padding: 0.55rem 0.9rem;
+            font-weight: 600;
+            border: 1px solid transparent;
+        }
+        .stTabs [role="tab"][aria-selected="true"] {
+            background: linear-gradient(180deg, var(--primary) 0%, #1e40af 100%);
+            color: white;
+            border-color: rgba(29,78,216,0.25);
+            box-shadow: 0 6px 18px rgba(29,78,216,0.18);
+        }
+        div[data-testid="stMetric"] {
+            background: rgba(255,255,255,0.9);
+            border: 1px solid var(--panel-border);
+            border-left: 4px solid var(--primary);
+            border-radius: 0.8rem;
+            padding: 0.7rem 0.9rem 0.5rem 0.9rem;
+            box-shadow: var(--shadow);
+            min-height: 110px;
+        }
+        div[data-testid="stMetric"] > label {
+            color: var(--muted);
+            font-weight: 600;
+            font-size: 0.78rem !important;
+        }
+        div[data-testid="stMetric"] > div {
+            font-size: 1.25rem !important;
+            line-height: 1.2;
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+            border-right: 1px solid rgba(148,163,184,0.18);
+        }
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .block-container {
+            color: #e2e8f0 !important;
+        }
+        [data-testid="stSidebar"] .stSelectbox > div,
+        [data-testid="stSidebar"] .stNumberInput > div,
+        [data-testid="stSidebar"] .stSlider > div,
+        [data-testid="stSidebar"] .stCheckbox {
+            background: rgba(15, 23, 42, 0.42);
+            border-radius: 0.55rem;
+        }
+        .stDataFrame, .stTable {
+            border-radius: 0.75rem;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+        .stAlert {
+            border-radius: 0.8rem;
+        }
+        .presentation-header {
+            background: linear-gradient(135deg, rgba(29,78,216,0.12), rgba(59,130,246,0.04));
+            border: 1px solid rgba(29,78,216,0.1);
+            border-radius: 0.9rem;
+            padding: 0.8rem 1rem;
+            margin-bottom: 0.8rem;
+        }
         </style>
         """, unsafe_allow_html=True,
     )
 
-    st.title("🏦 South African Credit Risk Volatility Engine")
-    st.caption("IFRS 9 ECL • Basel III RegCap • Economic Capital — aligned with SARB Directives 5/2017, 6/2024 & Regulation 38/43")
+    st.markdown(
+        """
+        <div class="presentation-header">
+            <div style="font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: #2563eb; font-weight: 700; margin-bottom: 0.2rem;">Executive risk dashboard</div>
+            <div style="font-size: 2.1rem; font-weight: 700; color: #10233b; line-height: 1.1;">South African Credit Risk Volatility Engine</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("IFRS 9 ECL, Basel III RegCap, and Economic Capital aligned with SARB Directives 5/2017, 6/2024, and Regulation 38/43")
 
     with st.sidebar:
-        st.header("⚙️ Engine Controls")
+        st.header("Engine Controls")
         scenario = st.selectbox("Scenario (SARB/IMF Standard)", ["Base", "Adverse", "Severe"], index=0)
         severity = st.slider("Severity Multiplier", 0.5, 2.5, 1.0, 0.1,
                               help="Interpolate between standard scenario bounds")
@@ -335,7 +295,7 @@ def main():
 
         seed = st.number_input("Random Seed", 0, 9999, 2024, 1)
         st.divider()
-        with st.expander("📋 Regulatory References"):
+        with st.expander("Regulatory References"):
             for k, v in SARB_DIRECTIVES.items():
                 st.markdown(f"- **{k}**: {v}")
 
@@ -349,7 +309,7 @@ def main():
     any_idio = any(idio_shocks.values())
     run_label = f"{scenario}" + (" + Idiosyncratic" if any_idio else "") + f" (Severity {severity}x)"
 
-    with st.spinner(f"🔄 Running Risk Engine: {run_label} — {n_accounts:,} accounts, {n_mc_sims:,} sims..."):
+    with st.spinner(f"Running Risk Engine: {run_label} - {n_accounts:,} accounts, {n_mc_sims:,} sims..."):
         result = run_engine_end_to_end(
             scenario=scenario,
             total_exposure=total_exposure,
@@ -369,7 +329,7 @@ def main():
     ratios = regcap["capital_ratios"]
     bench_df = result["benchmark_comparison"]
 
-    st.success(f"✅ Engine completed in {result['run_metadata']['duration_seconds']:.2f}s — Scenario: **{run_label}**")
+    st.success(f"Engine completed in {result['run_metadata']['duration_seconds']:.2f}s - Scenario: **{run_label}**")
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
@@ -395,33 +355,48 @@ def main():
     st.divider()
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "📊 Shock Propagation", "🧾 IFRS 9 & Staging", "🏛️ RegCap & RWA",
-        "📈 Economic Capital & MC", "🛡️ Coverage & Erosion",
-        "🎯 Benchmarks vs SA Banks", "⚠️ Uncertainty & Model Risk"
+        "Shock Propagation", "IFRS 9 & Staging", "RegCap & RWA",
+        "Economic Capital & MC", "Coverage & Erosion",
+        "Benchmarks vs SA Banks", "Uncertainty & Model Risk"
     ])
 
     with tab1:
-        st.subheader("1. Scenario Shock Drivers")
-        st.dataframe(result["scenario"]["shock_summary"], use_container_width=True, hide_index=True)
+        st.subheader("Scenario Shock Drivers")
+        try:
+            st.dataframe(result["scenario"]["shock_summary"], use_container_width=True, hide_index=True)
+        except Exception:
+            st.warning("Scenario detail was unavailable, but the engine still completed successfully.")
 
-        st.subheader("2. Propagation Through Capital Stack")
+        st.subheader("Propagation Through Capital Stack")
         result_severe = None
         if scenario != "Severe":
-            with st.spinner("Running Severe for propagation comparison..."):
+            with st.spinner("Running severe comparison..."):
                 try:
                     result_severe = run_engine_end_to_end(
                         scenario="Severe", total_exposure=total_exposure, n_accounts=n_accounts,
                         seed=seed, institution_size=institution_size, severity_multiplier=severity,
                         idiosyncratic_shocks=idio_shocks if any_idio else None,
-                        n_mc_sims=max(500, n_mc_sims//2), copula_type=copula_type,
+                        n_mc_sims=max(500, n_mc_sims // 2), copula_type=copula_type,
                     )
                 except Exception:
                     result_severe = None
-        st.plotly_chart(plot_propagation_path(result, result_severe), use_container_width=True)
+        try:
+            propagation = plot_propagation_path(result, result_severe)
+            if propagation.empty:
+                st.info("No propagation data available for this scenario.")
+            else:
+                st.line_chart(propagation.pivot_table(index="Step", columns="Scenario", values="Value", aggfunc="last"))
+        except Exception:
+            st.warning("The propagation chart was simplified because the underlying dataset was not ready for plotting.")
 
     with tab2:
         st.subheader("IFRS 9 Stage Distribution & ECL Allocation")
-        st.plotly_chart(plot_stage_distribution(ifrs9), use_container_width=True)
+        try:
+            stage_df = plot_stage_distribution(ifrs9)
+            st.bar_chart(stage_df.set_index("Stage")["Accounts"])
+            st.bar_chart(stage_df.set_index("Stage")["ECL_bn"])
+        except Exception:
+            st.warning("Stage graphics were not available; the summary metrics remain visible.")
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -433,26 +408,32 @@ def main():
                        f"{ifrs9['ecl_lifetime_total'] / max(ifrs9['ecl_12m_total'], 1):.2f}x")
 
         st.subheader("Portfolio-Level ECL Detail (by Segment)")
-        df_seg = ifrs9["portfolio"].groupby("segment").agg(
-            n_accounts=("account_id", "count"),
-            EAD=("ead", "sum"),
-            ECL=("ecl", "sum"),
-            avg_PD=("pit_pd_12m", "mean"),
-            avg_LGD=("lgd", "mean"),
-            Stage3_ECL=("ecl", lambda x: x[ifrs9["portfolio"].loc[x.index, "ifrs9_stage"] == 3].sum()),
-        ).reset_index()
-        df_seg["ECL Rate %"] = df_seg["ECL"] / df_seg["EAD"] * 100
-        for c in ["EAD", "ECL", "Stage3_ECL"]:
-            df_seg[c] = df_seg[c].apply(lambda x: f"R{x/1e6:,.1f}m")
-        df_seg["avg_PD"] = df_seg["avg_PD"].apply(lambda x: f"{x*100:.2f}%")
-        df_seg["avg_LGD"] = df_seg["avg_LGD"].apply(lambda x: f"{x*100:.1f}%")
-        df_seg["ECL Rate %"] = df_seg["ECL Rate %"].apply(lambda x: f"{x:.2f}%")
-        st.dataframe(df_seg.rename(columns={"segment": "Product Segment"}),
-                     use_container_width=True, hide_index=True)
+        try:
+            portfolio = pd.DataFrame(ifrs9["portfolio"])
+            df_seg = portfolio.groupby("segment", as_index=False).agg(
+                n_accounts=("account_id", "count"),
+                EAD=("ead", "sum"),
+                ECL=("ecl", "sum"),
+                avg_PD=("pit_pd_12m", "mean"),
+                avg_LGD=("lgd", "mean"),
+            )
+            df_seg["ECL Rate %"] = (df_seg["ECL"] / df_seg["EAD"] * 100).fillna(0.0)
+            df_seg["EAD"] = df_seg["EAD"].map(lambda x: f"R{x/1e6:,.1f}m")
+            df_seg["ECL"] = df_seg["ECL"].map(lambda x: f"R{x/1e6:,.1f}m")
+            df_seg["avg_PD"] = df_seg["avg_PD"].map(lambda x: f"{x*100:.2f}%")
+            df_seg["avg_LGD"] = df_seg["avg_LGD"].map(lambda x: f"{x*100:.1f}%")
+            df_seg["ECL Rate %"] = df_seg["ECL Rate %"].map(lambda x: f"{x:.2f}%")
+            st.dataframe(df_seg.rename(columns={"segment": "Product Segment"}), use_container_width=True, hide_index=True)
+        except Exception:
+            st.warning("Segment detail could not be rendered; the portfolio summary is still available above.")
 
     with tab3:
-        st.subheader("Capital Stack Waterfall")
-        st.plotly_chart(plot_capital_waterfall(regcap), use_container_width=True)
+        st.subheader("Capital Stack")
+        try:
+            capital_df = plot_capital_waterfall(regcap)
+            st.bar_chart(capital_df.set_index("Component")["Share_of_RWA"])
+        except Exception:
+            st.warning("Capital stack chart could not be rendered.")
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -470,20 +451,27 @@ def main():
                        delta="MDA trigger" if ratios["Payout Distribution Restriction %"] >= 1.0 else "Flexible")
 
         st.subheader("RWA Breakdown")
-        rwa_bd = result["rwa_breakdown"]
-        fig_rwa = px.pie(names=list(rwa_bd.keys()), values=list(rwa_bd.values()),
-                         title="Total RWA Composition by Risk Type",
-                         color_discrete_sequence=["#636EFA", "#00CC96", "#EF553B"], hole=0.45)
-        fig_rwa.update_traces(textinfo="label+percent+value", texttemplate="%{label}<br>%{percent}<br>R%{value:,.0f}")
-        st.plotly_chart(fig_rwa, use_container_width=True)
+        try:
+            rwa_bd = result["rwa_breakdown"]
+            rwa_df = pd.DataFrame({"Risk Type": list(rwa_bd.keys()), "RWA (R bn)": [float(x) / 1e9 for x in rwa_bd.values()]})
+            st.bar_chart(rwa_df.set_index("Risk Type"))
+        except Exception:
+            st.warning("RWA breakdown could not be plotted.")
 
     with tab4:
-        st.subheader("ECap Allocation (Nedbank 2024 Benchmark Framework)")
-        st.plotly_chart(plot_ecap_allocation(ecap), use_container_width=True)
+        st.subheader("ECap Allocation")
+        try:
+            ecap_df = plot_ecap_allocation(ecap)
+            st.bar_chart(ecap_df.set_index("Component")["Value"] / 1e9)
+        except Exception:
+            st.warning("Economic capital breakdown chart could not be rendered.")
 
-        st.subheader("Credit Portfolio Loss Distribution (Simulated)")
-        st.plotly_chart(plot_loss_distribution(result["monte_carlo"]["credit"], ifrs9["ecl_total"]),
-                         use_container_width=True)
+        st.subheader("Credit Portfolio Loss Distribution")
+        try:
+            loss_df = plot_loss_distribution(result["monte_carlo"]["credit"], ifrs9["ecl_total"])
+            st.histogram(loss_df["Portfolio Loss (R bn)"].dropna())
+        except Exception:
+            st.warning("Loss distribution could not be rendered; key summary metrics remain visible.")
 
         c1, c2, c3 = st.columns(3)
         credit_mc = result["monte_carlo"]["credit"]
@@ -498,7 +486,7 @@ def main():
         st.markdown(f"**ECL vs ECap Ratio:** {ecap['ecl_vs_ecap_ratio']:.2f}x (expect 1.0x in severe stress)")
 
     with tab5:
-        st.subheader("AFR vs ECap Coverage Ratio")
+        st.subheader("AFR vs ECap Coverage")
         cov_main = result["coverage"]["main"]
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -512,27 +500,44 @@ def main():
             st.metric("Surplus / (Shortfall)", FORMAT_ZAR(cov_main["Surplus / (Shortfall)"]),
                        delta_color="inverse" if cov_main["Surplus / (Shortfall)"] < 0 else "normal")
 
-        st.plotly_chart(plot_coverage_erosion(result["coverage"]), use_container_width=True)
+        try:
+            coverage_df = plot_coverage_erosion(result["coverage"])
+            st.line_chart(coverage_df.set_index("Shock Intensity (x)"))
+        except Exception:
+            st.warning("Coverage erosion plot was simplified because the input was not available.")
 
-        st.subheader("Coverage Decomposition: AFR Sources vs ECap Uses")
-        st.dataframe(result["coverage"]["decomposition"], use_container_width=True, hide_index=True)
+        st.subheader("Coverage Decomposition")
+        try:
+            st.dataframe(result["coverage"]["decomposition"], use_container_width=True, hide_index=True)
+        except Exception:
+            st.warning("Coverage decomposition table could not be rendered.")
 
     with tab6:
-        st.subheader("SA Bank Benchmark Comparison (Pillar 3, 2024)")
-        st.dataframe(bench_df, use_container_width=True, hide_index=True)
-        st.plotly_chart(plot_benchmark_radar(bench_df, regcap), use_container_width=True)
+        st.subheader("Bank Benchmark Comparison")
+        try:
+            st.dataframe(bench_df, use_container_width=True, hide_index=True)
+        except Exception:
+            st.warning("Benchmark table could not be rendered.")
+        try:
+            radar_df = plot_benchmark_radar(bench_df, regcap)
+            st.bar_chart(radar_df.set_index("Metric") if "Metric" in radar_df.columns else radar_df)
+        except Exception:
+            st.warning("Benchmark summary chart was simplified due to plotting incompatibility.")
 
     with tab7:
-        st.subheader("Model Uncertainty & 95% Confidence Intervals")
-        u_fig, u_df = plot_uncertainty_bands(result["uncertainty_bands"])
-        st.plotly_chart(u_fig, use_container_width=True)
-        st.dataframe(u_df, use_container_width=True, hide_index=True)
+        st.subheader("Model Uncertainty")
+        try:
+            u_df = plot_uncertainty_bands(result["uncertainty_bands"])
+            st.bar_chart(u_df.set_index("Metric"))
+            st.dataframe(u_df, use_container_width=True, hide_index=True)
+        except Exception:
+            st.warning("Uncertainty chart could not be rendered, but the model risk summary remains available.")
 
-        st.subheader("Model Risk Allocation (SA Banking Industry Standard: 2% of ECap)")
+        st.subheader("Model Risk Allocation")
         model_risk = NEDBANK_ECAP_BENCHMARK_2024["model_risk_pct"] * ecap["total_ecap"]
         st.info(f"**Model Risk Reserve:** R{model_risk/1e6:,.1f}m ({NEDBANK_ECAP_BENCHMARK_2024['model_risk_pct']*100:.1f}% of total ECap) — explicitly allocated per SA best practice.")
 
-        with st.expander("📜 Audit Trail: Assumptions & Parameterisation"):
+        with st.expander("Audit Trail: Assumptions & Parameterisation"):
             st.json({
                 "Scenario": result["scenario"]["parameters"],
                 "Portfolio Segments": {k: {kk: (f"{vv*100:.2f}%" if "pd" in kk or "lgd" in kk or "corr" in kk or "ccf" in kk else vv)

@@ -3,16 +3,17 @@
 Executes the full model pipeline:
     Data Acquisition -> IFRS 9 ECL -> RWA -> RegCap Stack ->
     Monte Carlo Copula Simulation -> ECap Allocation -> Coverage Analysis.
-
-Wrapped with Streamlit ``@st.cache_data`` for deterministic-input scenarios.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import subprocess
 import sys
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -412,3 +413,81 @@ def _write_run_summary_csv(
     except Exception:
         # Silent fail: audit trail is best-effort, never break the run
         pass
+
+
+# -----------------------------------------------------------------------------
+# Top-level CLI and orchestration entry points
+# -----------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create the top-level CLI parser for dashboard and pipeline commands."""
+    parser = argparse.ArgumentParser(description="South African Credit Risk Volatility Engine")
+    subparsers = parser.add_subparsers(dest="command")
+
+    dashboard_parser = subparsers.add_parser("dashboard", help="Launch the Streamlit dashboard")
+    dashboard_parser.add_argument("--port", type=int, default=8502, help="Port for the dashboard")
+    dashboard_parser.add_argument("--host", default="0.0.0.0", help="Host binding for the dashboard")
+
+    pipeline_parser = subparsers.add_parser("pipeline", help="Run the end-to-end pipeline once")
+    pipeline_parser.add_argument("--scenario", default="Base", choices=["Base", "Adverse", "Severe"])
+    pipeline_parser.add_argument("--total-exposure", type=float, default=500_000_000_000.0)
+    pipeline_parser.add_argument("--n-accounts", type=int, default=2000)
+    pipeline_parser.add_argument("--seed", type=int, default=2024)
+    pipeline_parser.add_argument("--institution-size", default="Large_D-SIB")
+    pipeline_parser.add_argument("--severity", type=float, default=1.0)
+    pipeline_parser.add_argument("--n-mc-sims", type=int, default=1500)
+    pipeline_parser.add_argument("--copula-type", default="t", choices=["t", "Gaussian"])
+
+    return parser
+
+
+def _run_pipeline_command(args: argparse.Namespace) -> int:
+    result = run_engine_end_to_end(
+        scenario=args.scenario,
+        total_exposure=args.total_exposure,
+        n_accounts=args.n_accounts,
+        seed=args.seed,
+        institution_size=args.institution_size,
+        severity_multiplier=args.severity,
+        n_mc_sims=args.n_mc_sims,
+        copula_type=args.copula_type,
+    )
+    summary = {
+        "scenario": args.scenario,
+        "total_exposure": result["ifrs9"]["ead_total"],
+        "ecl_total": result["ifrs9"]["ecl_total"],
+        "total_rwa": result["regcap"]["total_rwa"],
+        "total_ecap": result["economic_capital"]["total_ecap"],
+        "coverage_ratio": result["coverage"]["main"]["Coverage Ratio"],
+        "duration_seconds": result["run_metadata"]["duration_seconds"],
+    }
+    print(json.dumps(summary, indent=2, default=str))
+    return 0
+
+
+def _run_dashboard_command(args: argparse.Namespace) -> int:
+    app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "app.py")
+    cmd = [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(args.port), "--server.address", args.host]
+    return subprocess.call(cmd)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Main CLI entry point for the project."""
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 0
+
+    if args.command == "pipeline":
+        return _run_pipeline_command(args)
+    if args.command == "dashboard":
+        return _run_dashboard_command(args)
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

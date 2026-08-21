@@ -38,6 +38,39 @@ class RawDataset:
     acquisition_date: datetime = field(default_factory=datetime.now)
     data_quality: Dict = field(default_factory=dict)
 
+    def as_dict(self) -> Dict[str, object]:
+        """Return a mapping-compatible representation."""
+        return {
+            "macro": self.macro,
+            "loadshedding": self.loadshedding,
+            "markets": self.markets,
+            "timeseries": self.timeseries,
+            "portfolio": self.portfolio,
+            "acquisition_date": self.acquisition_date,
+            "data_quality": self.data_quality,
+        }
+
+    def __getitem__(self, key: str):
+        return self.as_dict()[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.as_dict()
+
+    def get(self, key: str, default=None):
+        return self.as_dict().get(key, default)
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def items(self):
+        return self.as_dict().items()
+
+    def values(self):
+        return self.as_dict().values()
+
+    def __iter__(self):
+        return iter(self.as_dict())
+
 
 def _ensure_positive(df: pd.DataFrame, cols: List[str]) -> List[str]:
     """Lightweight data quality validator -- returns list of failing flags."""
