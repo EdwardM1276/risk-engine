@@ -245,6 +245,7 @@ def run_engine_end_to_end(
         },
         "regcap": regcap_analysis,
         "rwa_breakdown": rwa_result["breakdown"],
+        "rwa_methodology": rwa_result["methodology"],
         "monte_carlo": {
             "credit": credit_mc,
             "market": market_mc,

@@ -429,6 +429,10 @@ def main():
 
     with tab3:
         st.subheader("Capital Stack")
+        st.caption(
+            "Prototype methodology: IRB-style Vasicek credit RWA, with FRTB-style "
+            "market and SA-OR-style operational stress approximations."
+        )
         try:
             capital_df = plot_capital_waterfall(regcap)
             st.bar_chart(capital_df.set_index("Component")["Share_of_RWA"])
@@ -470,6 +474,12 @@ def main():
         try:
             loss_df = plot_loss_distribution(result["monte_carlo"]["credit"], ifrs9["ecl_total"])
             st.histogram(loss_df["Portfolio Loss (R bn)"].dropna())
+            credit_tail = result["monte_carlo"]["credit"]
+            if credit_tail.get("tail_estimate_warning", False):
+                st.warning(
+                    "The 99.9% credit tail contains fewer than 100 simulated "
+                    "observations; treat ECap as directional, not a stable estimate."
+                )
         except Exception:
             st.warning("Loss distribution could not be rendered; key summary metrics remain visible.")
 
@@ -483,7 +493,8 @@ def main():
             st.metric("Credit ECap (UL 99.9%)", FORMAT_ZAR(credit_mc["credit_ecap_999"]),
                        delta=f"{credit_mc['credit_ecap_999_pct_ead']*100:.2f}% EAD")
 
-        st.markdown(f"**ECL vs ECap Ratio:** {ecap['ecl_vs_ecap_ratio']:.2f}x (expect 1.0x in severe stress)")
+        st.markdown(f"**ECL vs ECap Ratio:** {ecap['ecl_vs_ecap_ratio']:.2f}x")
+        st.caption(f"ECap method: {ecap.get('allocation_method', 'Not disclosed')}")
 
     with tab5:
         st.subheader("AFR vs ECap Coverage")

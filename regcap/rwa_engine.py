@@ -113,7 +113,12 @@ def compute_total_rwa(
     portfolio_df: pd.DataFrame,
     macro_conditions: Dict[str, float] | None = None,
 ) -> Dict:
-    """Compute total RWA across credit (IRB), market (FRTB) and operational (SA-OR) risks."""
+    """Compute total RWA across the documented prototype approaches.
+
+    Credit risk uses a Vasicek IRB-style calculation. Market risk and
+    operational risk are stress-sensitive approximations and are not claims of
+    full FRTB or current Basel operational-risk regulatory compliance.
+    """
     credit_df = compute_credit_rwa(portfolio_df)
     tcr = float(credit_df["credit_rwa"].sum())
     market = compute_market_rwa(tcr, macro_conditions=macro_conditions)
@@ -123,6 +128,12 @@ def compute_total_rwa(
     )
     total = tcr + market["market_rwa_total"] + op["operational_rwa"]
     return {
+        "methodology": {
+            "credit": "IRB-style Vasicek ASRF",
+            "market": "FRTB-style stress approximation",
+            "operational": "SA-OR-style stress approximation",
+            "regulatory_use": "Prototype only; not a regulatory reporting calculation",
+        },
         "credit_rwa_df": credit_df,
         "total_credit_rwa": tcr,
         "market": market,

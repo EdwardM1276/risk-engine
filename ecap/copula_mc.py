@@ -1,4 +1,4 @@
-"""ECap Monte Carlo: Gaussian/t-copula for credit, FRTB-style market, AMA operational."""
+"""ECap Monte Carlo: Gaussian/t-copula for credit and stress simulations."""
 
 from __future__ import annotations
 
@@ -50,7 +50,22 @@ def simulate_copula_defaults(
     macro_conditions: Optional[Dict[str, float]] = None,
     seed: int = 2024,
 ) -> Dict:
-    """Correlated default simulation -- returns VaR, ES, ECap at multiple confidence levels."""
+    """Simulate correlated defaults with distribution-consistent thresholds.
+
+    Both copula choices use the same Gaussian factor model. The Gaussian path
+    compares the latent variable with ``Phi^-1(PD)``. The t path applies one
+    common chi-square scale to the full latent vector and compares it with
+    ``t_df^-1(PD)``. Using a shared scale is what creates t-copula tail
+    dependence; transforming a t variate with the normal CDF does not.
+    """
+    copula_name = copula_type.lower()
+    if copula_name not in {"gaussian", "t"}:
+        raise ValueError("copula_type must be 'Gaussian' or 't'")
+    if n_sims < 1:
+        raise ValueError("n_sims must be positive")
+    if copula_name == "t" and t_df <= 2:
+        raise ValueError("t_df must be greater than 2 for stable tail simulation")
+
     rng = np.random.default_rng(seed)
     cls = confidence_levels or [0.90, 0.95, 0.975, 0.99, 0.999]
 
@@ -70,18 +85,22 @@ def simulate_copula_defaults(
         L = np.linalg.cholesky(R)
 
     seg_corr_values = np.array([PORTFOLIO_SEGMENTS[s]["corr"] for s in segments], dtype=float)
-    idio_vol = np.sqrt(np.clip(1.0 - seg_corr_values, 0.05, 0.99))
-    pd_inv = norm.ppf(np.clip(pds, 1e-8, 1 - 1e-8))
+    systematic_loading = np.sqrt(np.clip(seg_corr_values, 0.0, 0.99))
+    idio_vol = np.sqrt(np.clip(1.0 - seg_corr_values, 0.01, 1.0))
+    pd_clip = np.clip(pds, 1e-8, 1 - 1e-8)
+    thresholds = (
+        t.ppf(pd_clip, t_df)
+        if copula_name == "t"
+        else norm.ppf(pd_clip)
+    )
 
     losses = np.zeros(n_sims, dtype=float)
     for sim in range(n_sims):
-        if copula_type.lower() == "t":
-            z_seg = rng.standard_t(t_df, size=len(seg_list))
-            z_loan = (L @ z_seg)[seg_idx] / np.sqrt(max(rng.chisquare(t_df) / t_df, 0.1))
-            defaults = norm.cdf(z_loan + idio_vol * rng.standard_normal(n_loans)) < pds
-        else:
-            z_loan = (L @ rng.standard_normal(len(seg_list)))[seg_idx]
-            defaults = z_loan + idio_vol * rng.standard_normal(n_loans) < pd_inv
+        systematic = (L @ rng.standard_normal(len(seg_list)))[seg_idx]
+        latent = systematic_loading * systematic + idio_vol * rng.standard_normal(n_loans)
+        if copula_name == "t":
+            latent = latent / np.sqrt(max(rng.chisquare(t_df) / t_df, 1e-12))
+        defaults = latent < thresholds
         lgd_rand = rng.beta(4, 6, n_loans) * 0.4 + 0.8
         losses[sim] = float(np.sum(eads * lgds * lgd_rand * defaults))
 
@@ -97,6 +116,7 @@ def simulate_copula_defaults(
     el = float(np.mean(losses))
     ul999 = float(var_dict.get(0.999, el + 3.09 * np.std(losses)))
     ecap = max(ul999 - el, 0.0)
+    tail_count_999 = max(1, int(np.ceil(n_sims * (1.0 - 0.999))))
     return {
         "simulated_losses": losses,
         "expected_loss": el,
@@ -106,7 +126,9 @@ def simulate_copula_defaults(
         "credit_ecap_999_pct_ead": float(ecap / max(eads.sum(), 1.0)),
         "loss_std": float(np.std(losses)),
         "n_sims": int(n_sims),
-        "copula_type": copula_type,
+        "copula_type": copula_name,
+        "tail_observations_999": int(tail_count_999),
+        "tail_estimate_warning": bool(tail_count_999 < 100),
     }
 
 
@@ -154,7 +176,11 @@ def compute_operational_ecap(
     ls_stage: int = 2,
     seed: int = 2026,
 ) -> Dict[str, float]:
-    """AMA-style scenario-driven operational risk with loadshedding frequency uplift."""
+    """Prototype operational-risk scenario simulation with loadshedding uplift.
+
+    This is not a claim to implement the Basel Standardised Measurement
+    Approach or any current supervisory operational-risk framework.
+    """
     rng = np.random.default_rng(seed)
     gi = total_assets * 0.035
     factor = 1.0 + (float(ls_stage) / 8.0) * 0.6

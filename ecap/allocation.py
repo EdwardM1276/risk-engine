@@ -1,4 +1,4 @@
-"""ECap allocation: Nedbank 2024 benchmark split, business/model/stress-risk add-ons."""
+"""Economic capital aggregation with benchmark fallbacks for unsimulated risks."""
 
 from __future__ import annotations
 
@@ -17,7 +17,12 @@ def allocate_nedbank_ecap_benchmark(
     operational_ecap_from_simulation: Optional[float] = None,
     macro_conditions: Optional[Dict[str, float]] = None,
 ) -> Dict:
-    """Return total ECap split by 6 risk types per Nedbank 2024 benchmark weights."""
+    """Aggregate supplied risk measures and disclose benchmark fallbacks.
+
+    Published benchmark percentages are used only for components without a
+    supplied risk estimate. Simulated credit, market, and operational values
+    are therefore not forced into a benchmark-sized total.
+    """
     w = dict(NEDBANK_ECAP_BENCHMARK_2024)
     pct_rwa = w["total_ecap_to_rwa"]
     if macro_conditions:
@@ -26,35 +31,29 @@ def allocate_nedbank_ecap_benchmark(
         scale = 1.0 + 0.7 * ls + 0.8 * max(0.0, 0.012 - gdp) * 10.0
         pct_rwa = pct_rwa * float(np.clip(scale, 0.9, 1.8))
 
-    total_ecap = total_rwa * pct_rwa
-    credit = total_ecap * w["credit_risk_pct"]
-    market = total_ecap * w["market_risk_pct"]
-    op = total_ecap * w["operational_risk_pct"]
-    business = total_ecap * w["business_risk_pct"]
-    model = total_ecap * w["model_risk_pct"]
-    stress = total_ecap * w["stress_buffer_pct"]
+    benchmark_total = total_rwa * pct_rwa
+    credit = benchmark_total * w["credit_risk_pct"]
+    market = benchmark_total * w["market_risk_pct"]
+    op = benchmark_total * w["operational_risk_pct"]
+    business = benchmark_total * w["business_risk_pct"]
+    model = benchmark_total * w["model_risk_pct"]
+    stress = benchmark_total * w["stress_buffer_pct"]
+    supplied = any(value is not None for value in (
+        credit_ecap_from_simulation,
+        market_ecap_from_simulation,
+        operational_ecap_from_simulation,
+    ))
 
     if credit_ecap_from_simulation is not None:
-        credit = float(credit_ecap_from_simulation)
-        residual = max(0.0, total_ecap - credit)
-        rw = np.array([w["market_risk_pct"], w["operational_risk_pct"],
-                       w["business_risk_pct"], w["model_risk_pct"], w["stress_buffer_pct"]], dtype=float)
-        rw = rw / max(rw.sum(), 1e-9)
-        market, op, business, model, stress = (residual * rw).tolist()
-        total_ecap = credit + market + op + business + model + stress
+        credit = max(float(credit_ecap_from_simulation), 0.0)
 
     if market_ecap_from_simulation is not None:
-        delta = market_ecap_from_simulation - market
-        market = float(market_ecap_from_simulation)
-        credit = max(credit - delta * 0.6, 0.0)
-        stress = max(stress - delta * 0.4, 0.0)
+        market = max(float(market_ecap_from_simulation), 0.0)
 
     if operational_ecap_from_simulation is not None:
-        delta = operational_ecap_from_simulation - op
-        op = float(operational_ecap_from_simulation)
-        credit = max(credit - delta * 0.6, 0.0)
-        business = max(business - delta * 0.4, 0.0)
+        op = max(float(operational_ecap_from_simulation), 0.0)
 
+    total_ecap = credit + market + op + business + model + stress
     model_floor = total_ecap * MODEL_RISK_ALLOCATION
     if model < model_floor:
         shortfall = model_floor - model
@@ -65,6 +64,11 @@ def allocate_nedbank_ecap_benchmark(
     total = credit + market + op + business + model + stress
     return {
         "total_ecap": float(total),
+        "benchmark_total_ecap": float(benchmark_total),
+        "allocation_method": (
+            "Simulated component aggregation with benchmark fallbacks"
+            if supplied else "Nedbank benchmark allocation"
+        ),
         "components": {
             "Credit Risk ECap": float(credit),
             "Market Risk ECap": float(market),
