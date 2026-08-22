@@ -444,6 +444,35 @@ Following the independent critical review, the project was reworked in several h
 
 These changes improve conceptual transparency and reduce material implementation risk, but they do not remove the need for real-data calibration, independent validation, stronger tail methods, and formal model governance.
 
+## 12. Response to the Critical Review
+
+The review was treated as an engineering and model-risk worklist rather than as a request for cosmetic changes. The following table records the response honestly.
+
+| Review finding | Response | Status |
+|---|---|---|
+| The t-copula threshold construction was mathematically inconsistent. | Rebuilt the credit simulation around common latent-factor logic. Gaussian mode uses normal PD quantiles; t mode uses t-distribution PD quantiles and a shared chi-square scale. | Addressed in code and tested |
+| The simulation used unclear factor loadings. | Added segment-specific systematic loadings and complementary idiosyncratic loadings so latent variables preserve unit variance. | Addressed in code |
+| 99.9% estimates were unreliable at small sample sizes. | Added tail-observation counts and a visible warning when fewer than 100 empirical observations support the 99.9% estimate. The limitation remains for low simulation counts. | Partially addressed |
+| Operational-risk terminology suggested outdated AMA implementation. | Changed the language to “prototype operational-risk scenario simulation” and explicitly disclaimed full Basel Standardised Measurement Approach compliance. | Addressed in code and documentation |
+| Benchmark allocation could be mistaken for calculated economic capital. | Supplied credit, market, and operational simulations are now aggregated directly. Benchmark values are used only as fallbacks for unsimulated components, and the result exposes the allocation method. | Addressed in code |
+| RWA methodology was ambiguous. | The result now identifies credit risk as IRB-style Vasicek ASRF and market and operational risk as stress-sensitive approximations. | Addressed in code and dashboard |
+| Broad dashboard exception handling could hide defects. | The dashboard now presents user-visible warnings for failed sections and exposes simulation-quality warnings. Structured logging and failure identifiers remain future work. | Partially addressed |
+| Testing was too narrow. | Added tests for reproducibility, non-negative simulated losses, invalid parameters, tail warnings, and RWA methodology metadata. Full model validation, property testing across every component, and dashboard automation remain outstanding. | Partially addressed |
+| Synthetic data lacked empirical grounding and lineage. | No claim was made that synthetic data is representative. The report now treats this as a material limitation, but replacing it requires governed historical data and provenance controls outside this prototype pass. | Not solved; documented |
+| IFRS 9 SICR, lifetime ECL, and forward-looking information were under-specified. | The report now explicitly classifies these areas as incomplete and unsuitable for production reliance. A full fix requires calibrated default histories, contractual cash-flow data, EIR, prepayment, cure, scenario weighting, and audit evidence. | Not solved; documented |
+| Standardised versus IRB regulatory implementation was unclear. | The implementation is now labelled IRB-style for credit RWA, but it is not presented as a complete approved IRB or Standardised Approach implementation. | Clarified, not production-complete |
+| South African transmission mechanisms were shallow. | The current model retains loadshedding, sovereign, commodity, rand, and provincial drivers but explicitly treats their relationships as illustrative. Empirical sector, geographic, adaptation, and sovereign-bank nexus modelling remains future work. | Partially addressed |
+| Public GitHub and Streamlit Cloud are inappropriate for confidential bank data. | The report now distinguishes public demonstration from controlled institutional deployment. No confidential data should be added to the public repository or hosted deployment. | Documented; deployment architecture remains non-production |
+| CSV audit trail was insufficient. | The limitation is retained and documented. Immutable run storage, identity, parameter hashes, source-data snapshots, and approvals remain future governance work. | Not solved; documented |
+
+### What the review changed in the project
+
+The review changed the project in three important ways. First, it identified a material mathematical defect rather than merely a presentation issue, and that defect was corrected. Second, it prevented benchmark disclosures from being presented as if they were independently calculated economic capital. Third, it sharpened the boundary between a working prototype and a bank-grade model by making methodology labels, warnings, and unresolved limitations visible in the outputs.
+
+### What the review did not justify claiming
+
+The changes do not justify claiming IFRS 9 compliance, Basel approval, FRTB compliance, regulatory capital readiness, statistically stable 99.9% capital estimates at low simulation counts, or production suitability. The most important remaining work is empirical: obtain governed data, calibrate the models, validate them independently, and build the controls required for accountable use.
+
 ---
 
 ## Appendix A: Repository Deliverables
@@ -470,3 +499,4 @@ These changes improve conceptual transparency and reduce material implementation
 - GitHub repository created and populated.
 - Streamlit Cloud app created from `main` and `streamlit_app.py`.
 - Deployment dependency issue identified from live logs and addressed in commit `70c0481`.
+- Critical review fixes implemented and pushed in commit `da8e233`.
