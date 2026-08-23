@@ -8,6 +8,7 @@ class OrchestratorCliTests(unittest.TestCase):
         parser = run.build_parser()
         self.assertIsNotNone(parser)
         self.assertIn("pipeline", parser._subparsers._group_actions[0].choices)
+        self.assertIn("data-benchmark", parser._subparsers._group_actions[0].choices)
 
     def test_main_accepts_dashboard_mode(self):
         result = run.main(["dashboard", "--help"])

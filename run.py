@@ -21,7 +21,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.params import NEDBANK_ECAP_BENCHMARK_2024, SA_BANK_BENCHMARKS_2024
-from data.acquisition import acquire_all_data
+from data.acquisition import acquire_all_data, fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
 from ecap.allocation import allocate_nedbank_ecap_benchmark
 from ecap.copula_mc import (
     compute_market_risk_ecap,
@@ -71,6 +71,10 @@ def run_engine_end_to_end(
     idiosyncratic_shocks: Optional[Dict[str, Any]] = None,
     n_mc_sims: int = 1500,
     copula_type: str = "t",
+    data_source: str = "synthetic",
+    allow_synthetic_fallback: bool = False,
+    portfolio_path: Optional[str] = None,
+    strict_data_validation: bool = False,
 ) -> Dict[str, Any]:
     """Execute the complete engine pipeline.
 
@@ -109,8 +113,16 @@ def run_engine_end_to_end(
         n_accounts=n_accounts,
         periods=36,
         seed=seed,
+        data_source=data_source,
+        allow_synthetic_fallback=allow_synthetic_fallback,
+        portfolio_path=portfolio_path,
     )
     portfolio = raw_data["portfolio"]
+    if strict_data_validation and not raw_data["data_quality"].get("validation_ready", False):
+        raise ValueError(
+            "Strict validation requires a complete institutional dataset; "
+            f"data status is {raw_data['data_quality'].get('status')}"
+        )
 
     # 3. IFRS 9 pipeline
     ifrs9_df: pd.DataFrame = run_full_ifrs9_pipeline(
@@ -220,6 +232,8 @@ def run_engine_end_to_end(
             "n_accounts": int(len(ifrs9_df)),
             "n_mc_sims": int(n_mc_sims),
             "copula_type": copula_type,
+            "data_source": data_source,
+            "synthetic_fallback_used": bool(raw_data["data_quality"].get("synthetic_fallback_used", False)),
             "idio_hash": _hash_idio_shocks(idiosyncratic_shocks),
         },
         "scenario": {
@@ -439,6 +453,13 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--severity", type=float, default=1.0)
     pipeline_parser.add_argument("--n-mc-sims", type=int, default=1500)
     pipeline_parser.add_argument("--copula-type", default="t", choices=["t", "Gaussian"])
+    pipeline_parser.add_argument("--data-source", default="synthetic", choices=["synthetic", "public", "institutional"])
+    pipeline_parser.add_argument("--allow-synthetic-fallback", action="store_true")
+    pipeline_parser.add_argument("--portfolio-path", help="CSV/XLSX anonymized institutional portfolio extract")
+    pipeline_parser.add_argument("--strict-data-validation", action="store_true")
+
+    benchmark_parser = subparsers.add_parser("data-benchmark", help="Benchmark against observed public loan data")
+    benchmark_parser.add_argument("--dataset", default="uci-credit-card", choices=["uci-credit-card"])
 
     return parser
 
@@ -453,6 +474,10 @@ def _run_pipeline_command(args: argparse.Namespace) -> int:
         severity_multiplier=args.severity,
         n_mc_sims=args.n_mc_sims,
         copula_type=args.copula_type,
+        data_source=args.data_source,
+        allow_synthetic_fallback=args.allow_synthetic_fallback,
+        portfolio_path=args.portfolio_path,
+        strict_data_validation=args.strict_data_validation,
     )
     summary = {
         "scenario": args.scenario,
@@ -464,6 +489,14 @@ def _run_pipeline_command(args: argparse.Namespace) -> int:
         "duration_seconds": result["run_metadata"]["duration_seconds"],
     }
     print(json.dumps(summary, indent=2, default=str))
+    return 0
+
+
+def _run_data_benchmark_command(args: argparse.Namespace) -> int:
+    """Run an observed-data benchmark without feeding incomplete fields to IFRS 9."""
+    if args.dataset == "uci-credit-card":
+        observed = fetch_uci_credit_card_defaults()
+        print(json.dumps(summarize_uci_default_benchmark(observed), indent=2, default=str))
     return 0
 
 
@@ -483,6 +516,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "pipeline":
         return _run_pipeline_command(args)
+    if args.command == "data-benchmark":
+        return _run_data_benchmark_command(args)
     if args.command == "dashboard":
         return _run_dashboard_command(args)
 

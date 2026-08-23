@@ -41,6 +41,42 @@ def build_factor_correlation_matrix(
     return R
 
 
+def compute_convergence_diagnostics(
+    losses: np.ndarray,
+    confidence_level: float = 0.999,
+    checkpoints: Optional[List[float]] = None,
+    tolerance: float = 0.05,
+) -> Dict[str, object]:
+    """Measure tail-estimate movement across cumulative simulation checkpoints."""
+    values = np.asarray(losses, dtype=float)
+    if values.size == 0:
+        raise ValueError("losses must contain at least one observation")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level must be between 0 and 1")
+    points = checkpoints or [0.25, 0.50, 0.75, 1.0]
+    estimates = []
+    counts = []
+    for point in points:
+        count = max(1, int(np.ceil(values.size * point)))
+        sample = np.sort(values[:count])
+        index = min(int(np.floor(count * confidence_level)), count - 1)
+        estimates.append(float(sample[index]))
+        counts.append(count)
+    relative_changes = [
+        abs(estimates[index] - estimates[index - 1]) / max(abs(estimates[index - 1]), 1.0)
+        for index in range(1, len(estimates))
+    ]
+    return {
+        "confidence_level": float(confidence_level),
+        "checkpoints": [float(point) for point in points],
+        "simulation_counts": counts,
+        "tail_estimates": estimates,
+        "relative_changes": relative_changes,
+        "converged": bool(relative_changes and relative_changes[-1] <= tolerance),
+        "tolerance": float(tolerance),
+    }
+
+
 def simulate_copula_defaults(
     portfolio_df: pd.DataFrame,
     n_sims: int = 5000,
@@ -117,6 +153,7 @@ def simulate_copula_defaults(
     ul999 = float(var_dict.get(0.999, el + 3.09 * np.std(losses)))
     ecap = max(ul999 - el, 0.0)
     tail_count_999 = max(1, int(np.ceil(n_sims * (1.0 - 0.999))))
+    convergence = compute_convergence_diagnostics(losses)
     return {
         "simulated_losses": losses,
         "expected_loss": el,
@@ -129,6 +166,7 @@ def simulate_copula_defaults(
         "copula_type": copula_name,
         "tail_observations_999": int(tail_count_999),
         "tail_estimate_warning": bool(tail_count_999 < 100),
+        "convergence": convergence,
     }
 
 

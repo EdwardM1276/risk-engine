@@ -11,6 +11,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from run import run_engine_end_to_end
+from data.acquisition import fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
 from config.params import (
     SARB_DIRECTIVES, PILLAR1_MINIMA, CAPITAL_BUFFERS, SA_BANK_BENCHMARKS_2024,
     NEDBANK_ECAP_BENCHMARK_2024, PORTFOLIO_SEGMENTS,
@@ -53,6 +54,12 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_public_credit_benchmark():
+    """Cache the observed UCI benchmark for the current dashboard session."""
+    return summarize_uci_default_benchmark(fetch_uci_credit_card_defaults())
 
 
 def plot_stage_distribution(ifrs9):
@@ -232,8 +239,11 @@ def main():
         }
         [data-testid="stSidebar"] .stMarkdown,
         [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stCheckbox label,
+        [data-testid="stSidebar"] .stCheckbox label p,
+        [data-testid="stSidebar"] .stCheckbox label span,
         [data-testid="stSidebar"] .block-container {
-            color: #e2e8f0 !important;
+            color: #ffffff !important;
         }
         [data-testid="stSidebar"] .stSelectbox > div,
         [data-testid="stSidebar"] .stNumberInput > div,
@@ -274,24 +284,26 @@ def main():
 
     with st.sidebar:
         st.header("Engine Controls")
+        data_source = st.selectbox("Data Source", ["synthetic", "public"], index=1,
+                       help="Public mode uses live World Bank, SARB, FRED, and FDIC data")
         scenario = st.selectbox("Scenario (SARB/IMF Standard)", ["Base", "Adverse", "Severe"], index=0)
         severity = st.slider("Severity Multiplier", 0.5, 2.5, 1.0, 0.1,
                               help="Interpolate between standard scenario bounds")
         institution_size = st.selectbox("Institution Classification",
                                          ["Large_D-SIB", "Large", "Medium", "Small_Mutual"], index=0)
         total_exposure = st.number_input("Total Portfolio Exposure (R bn)", 100, 5000, 500, 50) * 1e9
-        n_accounts = st.slider("Synthetic Accounts", 500, 5000, 2000, 500)
+        n_accounts = st.slider("Portfolio Records", 500, 5000, 2000, 500)
         n_mc_sims = st.slider("Monte Carlo Simulations", 500, 5000, 1500, 250,
                                help="Correlated default copula simulations")
         copula_type = st.selectbox("Copula Family", ["t", "Gaussian"], index=0,
                                     help="t-copula captures tail dependence (SA systemic clustering)")
 
         st.subheader("Idiosyncratic Shocks")
-        sov_shock = st.checkbox("Sovereign Downgrade", value=False)
-        comm_shock = st.checkbox("Commodity Collapse", value=False)
-        cyber_shock = st.checkbox("Cyber / Operational Catastrophe", value=False)
-        housing_shock = st.checkbox("Housing Market Crash", value=False)
-        sme_shock = st.checkbox("SME Failure Wave", value=False)
+        sov_shock = st.checkbox("Sovereign Downgrade", value=False, key="shock_sovereign")
+        comm_shock = st.checkbox("Commodity Collapse", value=False, key="shock_commodity")
+        cyber_shock = st.checkbox("Cyber / Operational Catastrophe", value=False, key="shock_cyber")
+        housing_shock = st.checkbox("Housing Market Crash", value=False, key="shock_housing")
+        sme_shock = st.checkbox("SME Failure Wave", value=False, key="shock_sme")
 
         seed = st.number_input("Random Seed", 0, 9999, 2024, 1)
         st.divider()
@@ -320,6 +332,7 @@ def main():
             idiosyncratic_shocks=idio_shocks if any_idio else None,
             n_mc_sims=n_mc_sims,
             copula_type=copula_type,
+            data_source=data_source,
         )
 
     ifrs9 = result["ifrs9"]
@@ -330,6 +343,21 @@ def main():
     bench_df = result["benchmark_comparison"]
 
     st.success(f"Engine completed in {result['run_metadata']['duration_seconds']:.2f}s - Scenario: **{run_label}**")
+    quality = result["raw_data"]["data_quality"]
+    if quality.get("status") != "PASSED":
+        st.warning(
+            f"Data quality status: {quality.get('status', 'REVIEW')}. "
+            "This run is research-use only; inspect the evidence panel before interpreting results."
+        )
+    with st.expander("Evidence and Data Provenance"):
+        st.json({
+            "data_source": quality.get("data_source"),
+            "validation_ready": quality.get("validation_ready", False),
+            "synthetic_fallback_used": quality.get("synthetic_fallback_used", False),
+            "gap_flags": quality.get("gap_flags", []),
+            "placeholder_fields": quality.get("placeholder_fields", []),
+            "source_notes": quality.get("source_notes", {}),
+        })
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
@@ -377,6 +405,7 @@ def main():
                         seed=seed, institution_size=institution_size, severity_multiplier=severity,
                         idiosyncratic_shocks=idio_shocks if any_idio else None,
                         n_mc_sims=max(500, n_mc_sims // 2), copula_type=copula_type,
+                        data_source=data_source,
                     )
                 except Exception:
                     result_severe = None
@@ -480,6 +509,14 @@ def main():
                     "The 99.9% credit tail contains fewer than 100 simulated "
                     "observations; treat ECap as directional, not a stable estimate."
                 )
+            convergence = credit_tail.get("convergence", {})
+            if convergence and not convergence.get("converged", False):
+                st.warning(
+                    "The 99.9% tail has not converged at the configured tolerance. "
+                    "Treat the estimate as directional, not decision-grade."
+                )
+            elif convergence:
+                st.success("The cumulative tail estimate passed the configured convergence tolerance.")
         except Exception:
             st.warning("Loss distribution could not be rendered; key summary metrics remain visible.")
 
@@ -535,6 +572,15 @@ def main():
         except Exception:
             st.warning("Benchmark summary chart was simplified due to plotting incompatibility.")
 
+        st.subheader("Observed Public Credit Benchmark")
+        try:
+            observed_benchmark = load_public_credit_benchmark()
+            st.metric("UCI Observed Default Rate", f"{observed_benchmark['overall_default_rate'] * 100:.2f}%")
+            st.dataframe(pd.DataFrame(observed_benchmark["default_rate_by_dpd"]), use_container_width=True, hide_index=True)
+            st.caption("UCI Taiwan credit-card observations are a PD challenger benchmark, not bank-specific IFRS 9 data.")
+        except Exception as exc:
+            st.warning(f"Observed public benchmark unavailable: {exc}")
+
     with tab7:
         st.subheader("Model Uncertainty")
         try:
@@ -546,7 +592,7 @@ def main():
 
         st.subheader("Model Risk Allocation")
         model_risk = NEDBANK_ECAP_BENCHMARK_2024["model_risk_pct"] * ecap["total_ecap"]
-        st.info(f"**Model Risk Reserve:** R{model_risk/1e6:,.1f}m ({NEDBANK_ECAP_BENCHMARK_2024['model_risk_pct']*100:.1f}% of total ECap) — explicitly allocated per SA best practice.")
+        st.info(f"**Model Risk Reserve:** R{model_risk/1e6:,.1f}m ({NEDBANK_ECAP_BENCHMARK_2024['model_risk_pct']*100:.1f}% of total ECap) - explicitly allocated per SA best practice.")
 
         with st.expander("Audit Trail: Assumptions & Parameterisation"):
             st.json({

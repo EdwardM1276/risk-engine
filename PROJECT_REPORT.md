@@ -373,6 +373,56 @@ Streamlit Cloud provides a convenient public demonstration environment. It is no
 **Problem:** Local PowerShell command execution was complicated by a Python-backed terminal session and Windows path escaping.  
 **Resolution:** Repository and deployment actions were performed through the active Python process and browser tools, with the repository and deployment state independently verified.
 
+### Challenge 7: Public-data acquisition and provenance
+
+**Problem:** The original acquisition boundary generated every macro, market, and portfolio observation synthetically, so downstream calculations could not be presented as evidence from observed banking data.
+
+**Resolution:** `data/acquisition.py` now supports an explicit `data_source="public"` mode. It retrieves observed annual macro indicators from the World Bank API, observed rand exchange rates from FRED, and observed quarterly aggregate bank financials from the FDIC BankFind API. FDIC observations are normalized to the engine contract and retain bank name and reporting date. Public mode fails loudly if a provider fails; synthetic fallback is available only when explicitly enabled and is recorded in `data_quality` and `run_metadata`.
+
+**Important limitation:** FDIC data is an aggregate US bank panel, not account-level default, delinquency, collateral, recovery, or transition data. The normalized rows are suitable for a transparent observed-data benchmark and scale experiment, but they do not make the IFRS 9 account-level calibration empirical. Historical loadshedding data is intentionally empty in public mode rather than fabricated.
+
+### Public-data acquisition roadmap
+
+| Data need | Implemented public route | Stronger production route |
+|---|---|---|
+| Macro history | World Bank API; annual values interpolated for monthly display | SARB/BIS/IMF official series with release-vintage storage |
+| Current policy rates | SARB WebIndicators repo and prime snapshot | SARB historical rate-change series with release vintages |
+| Bank balance sheets | FDIC BankFind quarterly financials | SARB BA returns and bank Pillar 3 templates |
+| Market history | FRED rand exchange rate | JSE, SARB, Bloomberg, Refinitiv, or another licensed feed |
+| Delinquency/default transitions | Not publicly available at account level | Anonymized bank panel or bureau/consortium data under agreement |
+| LGD, collateral, recoveries | Not publicly available in required granularity | Workout and collateral realization history from a bank |
+| CCF/EAD behavior | Not publicly available in required granularity | Drawdown and limit history from a bank |
+| Loadshed exposure | No stable free historical source configured | Eskom/municipal event history joined to geocoded exposures |
+| Public loan-performance benchmark | UCI Taiwan credit-card defaults: 30,000 observed records with limits, six-month payment history, bills, payments, and outcomes | Freddie Mac/Fannie Mae loan-level performance for collateral and recovery calibration |
+
+The next validity milestone is therefore not another synthetic generator. It is a governed historical extract containing account snapshots, default flags and dates, contractual cash flows, limits and utilization, collateral and recoveries, ratings, staging decisions, and macro vintage timestamps. Public aggregate data can validate scale and direction, but only institution or consortium data can validate account-level IFRS 9 mechanics.
+
+### Acquisition architecture
+
+The acquisition boundary now has four layers:
+
+1. **Provider adapters:** World Bank, FRED, FDIC, SEC XBRL, and a generic configurable CSV adapter for SARB, IMF, JSE, Eskom, EBA, or licensed feeds.
+2. **Raw landing:** Provider responses or normalized extracts can be written under `data/raw/` with retrieval time, source URL, SHA-256 checksum, media type, and a JSONL manifest.
+3. **Normalization and validation:** Public aggregate observations and institutional CSV/XLSX extracts are mapped into the model contract with unit conversion, required-column checks, positive-value checks, and missingness flags.
+4. **Controlled consumption:** `synthetic`, `public`, and `institutional` modes are explicit. Public failures raise errors unless fallback is explicitly enabled. Institutional mode requires `portfolio_path`.
+
+Examples:
+
+```text
+python -m run pipeline --data-source public
+python -m run pipeline --data-source institutional --portfolio-path data/institutional/portfolio.csv
+```
+
+Credentials are not stored in the repository. Provider-specific API keys should be supplied through environment variables and endpoint configuration. The generic CSV adapter is the intended bridge for SARB, IMF, JSE, Eskom, EBA, and licensed vendor exports until their exact access agreements and schemas are available. Documentation scraping is used only to discover endpoint contracts and download links; it is never treated as a source of default, recovery, utilization, collateral, or market observations.
+
+Observed-data benchmarking is available without running the incomplete bank portfolio path:
+
+```text
+python -m run data-benchmark --dataset uci-credit-card
+```
+
+The command reports observed default rates by payment-status band and documents which model fields the dataset does not contain. Monte Carlo output now includes cumulative tail estimates and relative changes at simulation checkpoints. `--strict-data-validation` rejects public aggregate data and any institutional extract that is not complete enough for a validated run.
+
 ---
 
 ## 9. Recommended Development Roadmap
