@@ -1,52 +1,100 @@
-import pandas as pd
+"""Benchmark calibration methodology.
+
+Two documented central-tendency calibration scalars align the synthetic book
+with the averaged SA D-SIB benchmark profile:
+
+1. ``solve_lgd_calibration_factor`` -- a single multiplicative scalar on
+   regulatory LGD, solved so portfolio IRB credit RWA density matches the
+   benchmark credit-RWA density (profile RWA density x credit RWA share).
+   IRB K is linear in LGD, so the solve is a fixed-point iteration that
+   converges in a few steps (bounds guard the LGD clip at 1.0).
+
+2. ``calibrate_ecl_to_target`` -- a single multiplicative scalar on PIT and
+   lifetime PDs, solved so total ECL / total EAD matches the benchmark
+   ECL/EAD target (~1.5%). ECL is linear in PD, so the scalar is the ratio
+   of target to modelled ECL, re-applied through the ECL engine.
+
+Both scalars are bounded, reported in the run metadata, and asserted in
+tests/test_risk_sanity.py for auditability.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Tuple
+
 import numpy as np
-from scipy.optimize import minimize_scalar
-from data.acquisition import scale_portfolio_to_target
-from regcap.rwa_engine import compute_vasicek_rwa
-from config.params import PORTFOLIO_SEGMENTS
+import pandas as pd
 
-def calibrate_synthetic_book(target_metrics: dict, n_accounts: int = 5000) -> pd.DataFrame:
-    # 1. Generate distribution using Nedbank 2024 weights
-    weights = target_metrics.get("segment_weights") or {
-        "Retail_Mortgage": 0.35, "Corporate_Large": 0.20, "SME_Corporate": 0.15,
-        "Retail_Vehicle": 0.10, "Retail_CreditCard": 0.08, "Retail_Overdraft": 0.05,
-        "Sovereign_Bank": 0.07
+from config.params import BANK_BENCHMARK_PROFILES, DEFAULT_BANK_PROFILE
+from ifrs9.staging import calculate_ecl
+from regcap.rwa_engine import compute_credit_rwa
+
+LGD_FACTOR_BOUNDS: Tuple[float, float] = (0.25, 4.0)
+PD_FACTOR_BOUNDS: Tuple[float, float] = (0.25, 4.0)
+
+
+def solve_lgd_calibration_factor(
+    ifrs9_df: pd.DataFrame,
+    target_credit_density: float,
+    max_iter: int = 6,
+    tol: float = 1e-4,
+) -> Dict[str, float]:
+    """Solve the LGD scalar so IRB credit RWA / EAD hits the target density."""
+    ead_total = float(ifrs9_df["ead"].sum())
+    factor = 1.0
+    achieved = float("nan")
+    for _ in range(max_iter):
+        credit_df = compute_credit_rwa(ifrs9_df, lgd_calibration_factor=factor)
+        achieved = float(credit_df["credit_rwa"].sum()) / max(ead_total, 1.0)
+        if abs(achieved - target_credit_density) < tol:
+            break
+        factor = float(np.clip(factor * target_credit_density / max(achieved, 1e-9),
+                               *LGD_FACTOR_BOUNDS))
+    return {
+        "lgd_calibration_factor": float(factor),
+        "target_credit_rwa_density": float(target_credit_density),
+        "achieved_credit_rwa_density": float(achieved),
     }
-    segments = list(weights.keys())
-    probs = list(weights.values())
-    
-    data = []
-    for _ in range(n_accounts):
-        seg = np.random.choice(segments, p=probs)
-        cfg = PORTFOLIO_SEGMENTS[seg]
-        data.append({
-            'segment': seg,
-            'pd': cfg['pd'],
-            'lgd': cfg['lgd'],
-            'principal': 100000,
-            'undrawn': 20000
-        })
-    df = pd.DataFrame(data)
-    
-    # 2. Scale Exposure to target (e.g., R1,100bn)
-    df = scale_portfolio_to_target(df, target_metrics['total_exposure_bn'])
 
-    # 3. Solve for LGD scalar to hit 59% RWA density
-    target_density = target_metrics.get("rwa_density_pct", 59) / 100
-    
-    def objective(lgd_scale):
-        temp_lgd = np.clip(df['lgd'] * lgd_scale, 0.05, 0.90)
-        ead = df['principal'] + df['undrawn'] * 0.75
-        rwas = compute_vasicek_rwa(df['pd'].values, temp_lgd.values, ead.values)
-        current_density = rwas.sum() / ead.sum()
-        return (current_density - target_density)**2
 
-    res = minimize_scalar(objective, bounds=(0.1, 2.0), method='bounded')
-    df['lgd'] = np.clip(df['lgd'] * res.x, 0.05, 0.90)
-    
-    return df
+def apply_pd_calibration(ifrs9_df: pd.DataFrame, factor: float) -> pd.DataFrame:
+    """Apply a PD calibration scalar to PIT/lifetime PDs and recompute ECL.
 
-def compute_rwa_density(df):
-    ead = df['principal'] + df['undrawn'] * 0.75
-    rwa = compute_vasicek_rwa(df['pd'].values, df['lgd'].values, ead.values)
-    return rwa.sum() / ead.sum()
+    Staging is left unchanged (assigned from uncalibrated PDs); only the
+    provision level is re-anchored.
+    """
+    df = ifrs9_df.copy()
+    df["pit_pd_12m"] = np.clip(df["pit_pd_12m"].astype(float) * factor, 5e-5, 0.99)
+    df["lifetime_pd"] = np.clip(df["lifetime_pd"].astype(float) * factor, 5e-5, 0.99)
+    df["lifetime_pd"] = np.maximum(df["lifetime_pd"], df["pit_pd_12m"])
+    return calculate_ecl(df)
+
+
+def calibrate_ecl_to_target(
+    ifrs9_df: pd.DataFrame,
+    target_ecl_ead_ratio: float,
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Solve and apply the PD scalar so total ECL / EAD hits the benchmark
+    target (ECL is linear in PD)."""
+    ead_total = float(ifrs9_df["ead"].sum())
+    raw_ratio = float(ifrs9_df["ecl"].sum()) / max(ead_total, 1.0)
+    factor = float(np.clip(target_ecl_ead_ratio / max(raw_ratio, 1e-9), *PD_FACTOR_BOUNDS))
+
+    df = apply_pd_calibration(ifrs9_df, factor)
+    achieved = float(df["ecl"].sum()) / max(ead_total, 1.0)
+    return df, {
+        "pd_calibration_factor": factor,
+        "raw_ecl_ead_ratio": raw_ratio,
+        "target_ecl_ead_ratio": float(target_ecl_ead_ratio),
+        "achieved_ecl_ead_ratio": achieved,
+    }
+
+
+def calibration_targets_for_profile(bank_profile: str = DEFAULT_BANK_PROFILE) -> Dict[str, float]:
+    """Benchmark calibration targets implied by a bank profile."""
+    profile = BANK_BENCHMARK_PROFILES.get(bank_profile, BANK_BENCHMARK_PROFILES[DEFAULT_BANK_PROFILE])
+    return {
+        "rwa_density": float(profile["rwa_density"]),
+        "credit_rwa_density": float(profile["rwa_density"]) * float(profile["credit_rwa_share"]),
+        "ecl_ead_ratio": float(profile["ecl_ead_target"]),
+    }
