@@ -1,24 +1,16 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import sys
 import os
-from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from run import run_engine_end_to_end
 from data.acquisition import fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
 from config.params import (
-    SARB_DIRECTIVES, PILLAR1_MINIMA, CAPITAL_BUFFERS, SA_BANK_BENCHMARKS_2024,
-    NEDBANK_ECAP_BENCHMARK_2024, PORTFOLIO_SEGMENTS,
-)
-from scenarios.stress_engine import (
-    get_scenario_parameters, scenario_to_macro_conditions, scenario_to_market_data,
-    create_idiosyncratic_scenario, compute_scenario_shock_summary,
+    SARB_DIRECTIVES, NEDBANK_ECAP_BENCHMARK_2024, PORTFOLIO_SEGMENTS,
+    BANK_BENCHMARK_PROFILES, DEFAULT_BANK_PROFILE, D_SIB_BUFFER_TIERS,
 )
 
 st.set_page_config(
@@ -88,7 +80,6 @@ def plot_capital_waterfall(regcap):
         ("CCB", _safe_float(pct_map.get("CCB (Capital Conservation)", 0.0), 0.0)),
         ("CCyB", _safe_float(pct_map.get("CCyB (Countercyclical 2026)", 0.0), 0.0)),
         ("D-SIB", _safe_float(pct_map.get("D-SIB Buffer", 0.0), 0.0)),
-        ("HLA", _safe_float(pct_map.get("HLA Buffer", 0.0), 0.0)),
         ("Pillar 2", _safe_float(pct_map.get("Pillar 2 Add-on", 0.0), 0.0)),
     ]
     return pd.DataFrame(rows, columns=["Component", "Share_of_RWA"]).assign(Share_of_RWA=lambda d: d["Share_of_RWA"] * 100)
@@ -291,7 +282,16 @@ def main():
                               help="Interpolate between standard scenario bounds")
         institution_size = st.selectbox("Institution Classification",
                                          ["Large_D-SIB", "Large", "Medium", "Small_Mutual"], index=0)
-        total_exposure = st.number_input("Total Portfolio Exposure (R bn)", 100, 5000, 500, 50) * 1e9
+        profile_names = list(BANK_BENCHMARK_PROFILES.keys())
+        bank_profile = st.selectbox("Benchmark / Calibration Profile", profile_names,
+                                     index=profile_names.index(DEFAULT_BANK_PROFILE),
+                                     help="Calibration targets (RWA density, ECL/EAD, capital ratios)")
+        profile = BANK_BENCHMARK_PROFILES[bank_profile]
+        d_sib_bucket = st.selectbox("D-SIB Bucket (HLA tier)", [0, 1, 2, 3, 4, 5],
+                                     index=int(profile.get("d_sib_bucket", 3)),
+                                     format_func=lambda b: f"Bucket {b} ({D_SIB_BUFFER_TIERS.get(b, 0.0)*100:.1f}% CET1)" if b else "Bucket 0 (not a D-SIB)")
+        total_exposure = st.number_input("Total Portfolio Exposure (R bn)", 100, 5000,
+                                          int(profile["total_exposure_bn"]), 50) * 1e9
         n_accounts = st.slider("Portfolio Records", 500, 5000, 2000, 500)
         n_mc_sims = st.slider("Monte Carlo Simulations", 500, 5000, 1500, 250,
                                help="Correlated default copula simulations")
@@ -333,6 +333,8 @@ def main():
             n_mc_sims=n_mc_sims,
             copula_type=copula_type,
             data_source=data_source,
+            bank_profile=bank_profile,
+            d_sib_bucket=d_sib_bucket,
         )
 
     ifrs9 = result["ifrs9"]
@@ -341,6 +343,9 @@ def main():
     coverage = result["coverage"]["main"]
     ratios = regcap["capital_ratios"]
     bench_df = result["benchmark_comparison"]
+    output_floor = result["output_floor"]
+    rwa_density = result["rwa_density"]
+    ecl_ead = ifrs9["ecl_ead_ratio"]
 
     st.success(f"Engine completed in {result['run_metadata']['duration_seconds']:.2f}s - Scenario: **{run_label}**")
     quality = result["raw_data"]["data_quality"]
@@ -361,17 +366,20 @@ def main():
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        st.metric("Total Exposure (EAD)", FORMAT_ZAR(ifrs9["ead_total"]))
+        ead_target = result["run_metadata"]["target_total_exposure"]
+        st.metric("Total Exposure (EAD)", FORMAT_ZAR(ifrs9["ead_total"]),
+                   delta=f"Target: {FORMAT_ZAR(ead_target)}")
     with col2:
         st.metric("IFRS 9 ECL", FORMAT_ZAR(ifrs9["ecl_total"]),
-                   delta=f"{ifrs9['ecl_total']/max(ifrs9['ead_total'],1)*100:.2f}% EAD", delta_color="inverse")
+                   delta=f"{ecl_ead*100:.2f}% EAD (bench {profile['ecl_ead_target']*100:.1f}%)",
+                   delta_color="inverse")
     with col3:
         st.metric("Total RWA", FORMAT_ZAR(regcap["total_rwa"]),
-                   delta=f"{regcap['total_rwa']/max(ifrs9['ead_total'],1)*100:.1f}% EAD density")
+                   delta=f"{rwa_density*100:.1f}% density (bench {profile['rwa_density']*100:.0f}%)")
     with col4:
-        st.metric("Total Capital Adequacy Ratio", FORMAT_PCT(ratios["Total CAR"]),
-                   delta="Pass" if ratios["Total CAR"] > 0.115 else "Warning",
-                   delta_color="normal" if ratios["Total CAR"] > 0.115 else "inverse")
+        st.metric("CET1 Ratio", FORMAT_PCT(ratios["CET1 Ratio"]),
+                   delta=f"Bench: {profile['cet1']*100:.1f}%",
+                   delta_color="normal" if ratios["CET1 Ratio"] >= 0.11 else "inverse")
     with col5:
         st.metric("Total ECap Required", FORMAT_ZAR(ecap["total_ecap"]),
                    delta=f"{ecap['total_ecap_pct_rwa']*100:.1f}% of RWA")
@@ -406,6 +414,7 @@ def main():
                         idiosyncratic_shocks=idio_shocks if any_idio else None,
                         n_mc_sims=max(500, n_mc_sims // 2), copula_type=copula_type,
                         data_source=data_source,
+                        bank_profile=bank_profile, d_sib_bucket=d_sib_bucket,
                     )
                 except Exception:
                     result_severe = None
@@ -474,14 +483,47 @@ def main():
                        delta=f"Surplus: {FORMAT_ZAR(max(0, ratios['CET1 Surplus (vs CET1+Buffers)']))}",
                        delta_color="inverse" if ratios["CET1 Surplus (vs CET1+Buffers)"] < 0 else "normal")
         with c2:
+            st.metric("Tier 1 Ratio", FORMAT_PCT(ratios["Tier1 Ratio"]),
+                       delta=f"Bench: {profile['tier1']*100:.1f}%")
+        with c3:
+            st.metric("Total CAR", FORMAT_PCT(ratios["Total CAR"]),
+                       delta=f"Bench: {profile['total_capital']*100:.1f}%")
+        with c4:
             st.metric("Combined Buffer Usage", f"{ratios['Combined Buffer Utilisation %']*100:.1f}%",
                        delta=ratios["Conservation Level"].split(" - ")[0],
                        delta_color="inverse" if ratios["Combined Buffer Utilisation %"] > 1.0 else "normal")
+
+        c1, c2, c3, c4 = st.columns(4)
+        d_sib_info = regcap["capital_stack"]["d_sib"]
+        with c1:
+            st.metric("Leverage Ratio", FORMAT_PCT(ratios["Leverage Ratio"]),
+                       delta=f"Req: {ratios['Leverage Requirement']*100:.2f}% | Bench: {profile['leverage']*100:.1f}%",
+                       delta_color="inverse" if ratios["Leverage Surplus"] < 0 else "normal")
+        with c2:
+            st.metric("D-SIB Bucket", f"Bucket {d_sib_info['bucket']}",
+                       delta=f"HLA buffer: {d_sib_info['buffer_rate']*100:.1f}% CET1")
         with c3:
-            st.metric("Leverage Ratio", FORMAT_PCT(ratios["Leverage Ratio"]))
-        with c4:
             st.metric("Payout Restriction", FORMAT_PCT(ratios["Payout Distribution Restriction %"]),
                        delta="MDA trigger" if ratios["Payout Distribution Restriction %"] >= 1.0 else "Flexible")
+        with c4:
+            st.metric("Output Floor",
+                       "Binding" if output_floor["floor_applied"] else "Not binding",
+                       delta=f"Floor ({output_floor['floor_pct']*100:.1f}% of SA): {FORMAT_ZAR(output_floor['floor_rwa'])}",
+                       delta_color="inverse" if output_floor["floor_applied"] else "normal")
+
+        st.subheader("Output Floor Mechanics")
+        st.caption("Final RWA = max(modelled IRB RWA, floor % x standardised RWA) - Basel III output floor")
+        floor_df = pd.DataFrame([
+            {"Measure": "Modelled (IRB) RWA", "R bn": output_floor["modelled_rwa"] / 1e9},
+            {"Measure": "Standardised RWA", "R bn": output_floor["standardised_rwa"] / 1e9},
+            {"Measure": f"Floor ({output_floor['floor_pct']*100:.1f}% of SA)", "R bn": output_floor["floor_rwa"] / 1e9},
+            {"Measure": "Final RWA", "R bn": output_floor["final_rwa"] / 1e9},
+        ])
+        st.bar_chart(floor_df.set_index("Measure"))
+        st.caption(
+            f"Floor headroom: {FORMAT_ZAR(output_floor['floor_headroom'])} "
+            f"({'floor is binding' if output_floor['floor_applied'] else 'modelled RWA above floor'})"
+        )
 
         st.subheader("RWA Breakdown")
         try:
@@ -502,7 +544,8 @@ def main():
         st.subheader("Credit Portfolio Loss Distribution")
         try:
             loss_df = plot_loss_distribution(result["monte_carlo"]["credit"], ifrs9["ecl_total"])
-            st.histogram(loss_df["Portfolio Loss (R bn)"].dropna())
+            st.plotly_chart(px.histogram(loss_df, x="Portfolio Loss (R bn)", nbins=60),
+                             use_container_width=True)
             credit_tail = result["monte_carlo"]["credit"]
             if credit_tail.get("tail_estimate_warning", False):
                 st.warning(
@@ -562,6 +605,12 @@ def main():
 
     with tab6:
         st.subheader("Bank Benchmark Comparison")
+        st.caption(
+            f"Calibration profile: **{bank_profile.replace('_', ' ')}** "
+            f"(RWA density {profile['rwa_density']*100:.0f}%, CET1 {profile['cet1']*100:.1f}%, "
+            f"Tier 1 {profile['tier1']*100:.1f}%, Total {profile['total_capital']*100:.1f}%, "
+            f"leverage {profile['leverage']*100:.1f}%, ECL/EAD {profile['ecl_ead_target']*100:.1f}%)"
+        )
         try:
             st.dataframe(bench_df, use_container_width=True, hide_index=True)
         except Exception:
@@ -605,7 +654,11 @@ def main():
                     "copula_type": result["run_metadata"]["copula_type"],
                     "duration_seconds": round(result["run_metadata"]["duration_seconds"], 3),
                     "run_start": str(result["run_metadata"]["run_start"]),
-                }
+                },
+                "Calibration (audit trail)": {
+                    k: (round(v, 6) if isinstance(v, float) else v)
+                    for k, v in result["calibration"].items() if k != "targets"
+                },
             })
 
 

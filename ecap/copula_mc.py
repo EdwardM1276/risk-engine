@@ -1,364 +1,240 @@
-"""
-ECap Monte Carlo Credit Simulation Engine
+"""ECap Monte Carlo: Gaussian/t-copula for credit and stress simulations."""
 
-Implements Gaussian and t-copula portfolio credit default simulation
-with South African segment-specific correlation structures.
+from __future__ import annotations
 
-Mathematical foundations:
-- Gaussian copula: latent = sqrt(rho)*Z + sqrt(1-rho)*eps; threshold = norm.ppf(PD)
-- T-copula: latent = sqrt(chi2_df/df) * (sqrt(rho)*Z + sqrt(1-rho)*eps); threshold = t.ppf(PD, df)
-- Correlation matrix built from segment-type metadata (retail, sme, corporate, sovereign)
-- Batch processing to control memory at high simulation counts
-
-All previous fixes preserved:
-- 50,000 default simulation count
-- Consistent t-copula mathematics (shared chi-square scale, t-distribution thresholds)
-- Segment-type metadata replaces fragile string matching
-- Tail observation warnings for 99.9% estimates
-- Input validation for copula names, non-positive simulations, unstable t degrees of freedom
-"""
+from typing import Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm, t
-from typing import List, Dict, Any, Optional
-import warnings
 
-# Import segment metadata from central config
-try:
-    from config.params import PORTFOLIO_SEGMENTS
-except ImportError:
-    # Fallback for standalone testing
-    PORTFOLIO_SEGMENTS = {
-        "Retail_Mortgage":   {"corr": 0.15, "type": "retail"},
-        "Retail_Vehicle":    {"corr": 0.18, "type": "retail"},
-        "Retail_CreditCard": {"corr": 0.20, "type": "retail"},
-        "Retail_Overdraft":  {"corr": 0.22, "type": "retail"},
-        "SME_Corporate":     {"corr": 0.25, "type": "sme"},
-        "Corporate_Large":   {"corr": 0.30, "type": "corporate"},
-        "Sovereign_Bank":    {"corr": 0.10, "type": "sovereign"},
-    }
+from config.params import PORTFOLIO_SEGMENTS
 
 
-def build_factor_correlation_matrix(segments: List[str]) -> np.ndarray:
-    """
-    Build an n x n correlation matrix using segment-type metadata.
-
-    Replaces fragile string matching ("SME" in name) with explicit
-    type-based correlation rules derived from config/params.py.
-
-    Rules:
-        - Same type: base correlation (average of the two segment corrs)
-        - Sovereign vs anything: 0.05
-        - SME vs Corporate: 0.20
-        - Retail vs anything: 0.10
-        - Default cross-type: 0.15
-        - Hard cap at 0.75
-    """
+def build_factor_correlation_matrix(
+    segments: List[str],
+    macro_conditions: Optional[Dict[str, float]] = None,
+) -> np.ndarray:
+    """Segment-level systematic factor correlation matrix with sovereign nexus amplifier."""
     n = len(segments)
-    corr_mat = np.eye(n)
-
-    # Map each segment to its type from PORTFOLIO_SEGMENTS
-    seg_types = {}
-    for seg in segments:
-        meta = PORTFOLIO_SEGMENTS.get(seg, {})
-        seg_types[seg] = meta.get("type", "unknown")
+    R = np.zeros((n, n), dtype=float)
+    ls = float((macro_conditions or {}).get("load_shedding_stage", 2)) / 8.0
+    sov = float((macro_conditions or {}).get("sovereign_cds_change_bps", 0)) / 300.0
+    stress = 1.0 + 0.3 * ls + 0.5 * sov
 
     for i, si in enumerate(segments):
         for j, sj in enumerate(segments):
             if i == j:
-                corr_mat[i, j] = 1.0
+                R[i, j] = 1.0
                 continue
-
-            ti, tj = seg_types[si], seg_types[sj]
-            base_i = PORTFOLIO_SEGMENTS.get(si, {}).get("corr", 0.20)
-            base_j = PORTFOLIO_SEGMENTS.get(sj, {}).get("corr", 0.20)
-
-            if ti == tj:
-                # Same type: use average of the two base correlations
-                corr = (base_i + base_j) / 2.0
-            elif ti == "sovereign" or tj == "sovereign":
-                corr = 0.05
-            elif (ti == "sme" and tj == "corporate") or (ti == "corporate" and tj == "sme"):
-                corr = 0.20
-            elif ti == "retail" or tj == "retail":
-                corr = 0.10
-            else:
-                corr = 0.15
-
-            corr = min(corr, 0.75)
-            corr_mat[i, j] = corr
-            corr_mat[j, i] = corr
-
-    return corr_mat
+            base = 0.25
+            if "Retail" in si and "Retail" in sj:
+                base = 0.45
+            if si == "Sovereign_Bank" or sj == "Sovereign_Bank":
+                base = 0.40 if si != sj else 0.55
+                base *= (1.0 + 0.5 * sov)
+            if "SME" in si or "SME" in sj:
+                base += 0.05
+            if "Corporate" in si and "Corporate" in sj:
+                base = 0.50
+            R[i, j] = float(np.clip(base * stress, 0.05, 0.95))
+    return R
 
 
-def _ensure_positive_definite(corr_mat: np.ndarray, eps: float = 0.001) -> np.ndarray:
-    """
-    Ensure correlation matrix is positive definite by adding small epsilon
-    to diagonal if needed, then rescaling to preserve unit diagonal.
-
-    Note: This is a pragmatic fix. For production, use Higham's nearest
-    correlation matrix algorithm.
-    """
-    # Add small jitter to diagonal if eigenvalues are near zero
-    min_eig = np.min(np.linalg.eigvalsh(corr_mat))
-    if min_eig < 1e-8:
-        corr_mat = corr_mat + np.eye(corr_mat.shape[0]) * eps
-        # Rescale to unit diagonal
-        d = np.sqrt(np.diag(corr_mat))
-        corr_mat = corr_mat / np.outer(d, d)
-        np.fill_diagonal(corr_mat, 1.0)
-    return corr_mat
+def compute_convergence_diagnostics(
+    losses: np.ndarray,
+    confidence_level: float = 0.999,
+    checkpoints: Optional[List[float]] = None,
+    tolerance: float = 0.05,
+) -> Dict[str, object]:
+    """Measure tail-estimate movement across cumulative simulation checkpoints."""
+    values = np.asarray(losses, dtype=float)
+    if values.size == 0:
+        raise ValueError("losses must contain at least one observation")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level must be between 0 and 1")
+    points = checkpoints or [0.25, 0.50, 0.75, 1.0]
+    estimates = []
+    counts = []
+    for point in points:
+        count = max(1, int(np.ceil(values.size * point)))
+        sample = np.sort(values[:count])
+        index = min(int(np.floor(count * confidence_level)), count - 1)
+        estimates.append(float(sample[index]))
+        counts.append(count)
+    relative_changes = [
+        abs(estimates[index] - estimates[index - 1]) / max(abs(estimates[index - 1]), 1.0)
+        for index in range(1, len(estimates))
+    ]
+    return {
+        "confidence_level": float(confidence_level),
+        "checkpoints": [float(point) for point in points],
+        "simulation_counts": counts,
+        "tail_estimates": estimates,
+        "relative_changes": relative_changes,
+        "converged": bool(relative_changes and relative_changes[-1] <= tolerance),
+        "tolerance": float(tolerance),
+    }
 
 
 def simulate_copula_defaults(
-    portfolio: List[Dict[str, Any]],
-    n_sims: int = 50000,
-    seed: int = 42,
-    copula_type: str = "gaussian",
-    t_df: float = 5.0,
-    batch_size: int = 10000
-) -> Dict[str, Any]:
-    """
-    Simulate portfolio credit losses using Gaussian or t-copula.
+    portfolio_df: pd.DataFrame,
+    n_sims: int = 5000,
+    copula_type: str = "t",
+    t_df: int = 6,
+    confidence_levels: Optional[List[float]] = None,
+    macro_conditions: Optional[Dict[str, float]] = None,
+    seed: int = 2024,
+) -> Dict:
+    """Simulate correlated defaults with distribution-consistent thresholds.
 
-    Parameters
-    ----------
-    portfolio : list of dict
-        Each dict must contain keys: 'pd', 'lgd', 'principal', 'undrawn', 'segment'
-    n_sims : int, default 50000
-        Number of Monte Carlo simulations. Default raised to 50,000 for
-        tail stability at 99.9% confidence.
-    seed : int, default 42
-        Random seed for reproducibility.
-    copula_type : {'gaussian', 't'}, default 'gaussian'
-        Copula family for default correlation.
-    t_df : float, default 5.0
-        Degrees of freedom for t-copula. Must be > 2 for finite variance.
-    batch_size : int, default 10000
-        Process simulations in batches to control memory usage.
-        10,000 simulations x 1,000 accounts ~ 80MB per batch.
-
-    Returns
-    -------
-    dict
-        {
-            'mean_loss': float,
-            'var_999': float,
-            'es_999': float,
-            'n_sims': int,
-            'tail_observations_999': int,
-            'tail_estimate_warning': str or None,
-            'copula_type': str,
-            't_df': float,
-            'batch_size': int,
-            'std_loss': float,
-            'losses': np.ndarray  # full loss distribution (n_sims,)
-        }
+    Both copula choices use the same Gaussian factor model. The Gaussian path
+    compares the latent variable with ``Phi^-1(PD)``. The t path applies one
+    common chi-square scale to the full latent vector and compares it with
+    ``t_df^-1(PD)``. Using a shared scale is what creates t-copula tail
+    dependence; transforming a t variate with the normal CDF does not.
     """
-    # ---- Input validation ----
-    if copula_type not in ("gaussian", "t"):
-        raise ValueError(f"copula_type must be 'gaussian' or 't', got '{copula_type}'")
-    if n_sims <= 0:
-        raise ValueError(f"n_sims must be positive, got {n_sims}")
-    if copula_type == "t" and t_df <= 2:
-        raise ValueError(f"t_df must be > 2 for finite variance, got {t_df}")
+    copula_name = copula_type.lower()
+    if copula_name not in {"gaussian", "t"}:
+        raise ValueError("copula_type must be 'Gaussian' or 't'")
+    if n_sims < 1:
+        raise ValueError("n_sims must be positive")
+    if copula_name == "t" and t_df <= 2:
+        raise ValueError("t_df must be greater than 2 for stable tail simulation")
 
     rng = np.random.default_rng(seed)
-    n_accounts = len(portfolio)
+    cls = confidence_levels or [0.90, 0.95, 0.975, 0.99, 0.999]
 
-    if n_accounts == 0:
-        return {
-            "mean_loss": 0.0,
-            "var_999": 0.0,
-            "es_999": 0.0,
-            "n_sims": n_sims,
-            "tail_observations_999": 0,
-            "tail_estimate_warning": "Empty portfolio",
-            "copula_type": copula_type,
-            "t_df": t_df,
-            "batch_size": batch_size,
-            "std_loss": 0.0,
-            "losses": np.array([])
-        }
+    seg_list = list(PORTFOLIO_SEGMENTS.keys())
+    segments = portfolio_df["segment"].values
+    eads = portfolio_df["ead"].values.astype(float)
+    lgds = portfolio_df["lgd"].values.astype(float)
+    pds = portfolio_df["pit_pd_12m"].values.astype(float)
+    n_loans = len(portfolio_df)
+    seg_idx = np.array([seg_list.index(s) if s in seg_list else 3 for s in segments], dtype=int)
 
-    # ---- Extract portfolio arrays ----
-    pds = np.array([acc["pd"] for acc in portfolio], dtype=float)
-    lgds = np.array([acc["lgd"] for acc in portfolio], dtype=float)
-    principals = np.array([acc["principal"] for acc in portfolio], dtype=float)
-    undrawns = np.array([acc.get("undrawn", 0.0) for acc in portfolio], dtype=float)
-    ccfs = np.array([acc.get("ccf", 0.75) for acc in portfolio], dtype=float)
-    segments = [acc.get("segment", "Unknown") for acc in portfolio]
+    R = build_factor_correlation_matrix(seg_list, macro_conditions)
+    try:
+        L = np.linalg.cholesky(R)
+    except np.linalg.LinAlgError:
+        R = 0.5 * (R + R.T) + np.eye(len(seg_list)) * 0.001
+        L = np.linalg.cholesky(R)
 
-    # EAD = drawn + CCF * undrawn
-    eads = principals + ccfs * undrawns
+    seg_corr_values = np.array([PORTFOLIO_SEGMENTS[s]["corr"] for s in segments], dtype=float)
+    systematic_loading = np.sqrt(np.clip(seg_corr_values, 0.0, 0.99))
+    idio_vol = np.sqrt(np.clip(1.0 - seg_corr_values, 0.01, 1.0))
+    pd_clip = np.clip(pds, 1e-8, 1 - 1e-8)
+    thresholds = (
+        t.ppf(pd_clip, t_df)
+        if copula_name == "t"
+        else norm.ppf(pd_clip)
+    )
 
-    # Clip PDs to valid open interval (0, 1) for inverse CDFs
-    pd_clip = np.clip(pds, 0.0001, 0.9999)
-
-    # ---- Build correlation structure ----
-    corr_mat = build_factor_correlation_matrix(segments)
-    corr_mat = _ensure_positive_definite(corr_mat)
-
-    # Cholesky decomposition for correlated random draws
-    chol = np.linalg.cholesky(corr_mat)
-
-    # ---- Pre-compute thresholds ----
-    if copula_type == "gaussian":
-        thresholds = norm.ppf(pd_clip)
-    else:  # t-copula
-        thresholds = t.ppf(pd_clip, df=t_df)
-
-    # ---- Batch simulation ----
-    total_losses = []
-    n_batches = (n_sims + batch_size - 1) // batch_size
-
-    for batch_idx in range(n_batches):
-        batch_n = min(batch_size, n_sims - batch_idx * batch_size)
-
-        # Generate independent standard normals for all accounts
-        z_independent = rng.standard_normal((batch_n, n_accounts))
-
-        # Correlate via Cholesky: Z_correlated = Z_independent @ chol.T
-        z_correlated = z_independent @ chol.T
-
-        if copula_type == "t":
-            # Shared chi-square scale for t-copula
-            chi2 = rng.chisquare(df=t_df, size=batch_n)
-            scale = np.sqrt(t_df / chi2)  # shape (batch_n,)
-            latent = scale[:, np.newaxis] * z_correlated
-        else:
-            latent = z_correlated
-
-        # Default indicator: latent < threshold
+    losses = np.zeros(n_sims, dtype=float)
+    for sim in range(n_sims):
+        systematic = (L @ rng.standard_normal(len(seg_list)))[seg_idx]
+        latent = systematic_loading * systematic + idio_vol * rng.standard_normal(n_loans)
+        if copula_name == "t":
+            latent = latent / np.sqrt(max(rng.chisquare(t_df) / t_df, 1e-12))
         defaults = latent < thresholds
+        lgd_rand = rng.beta(4, 6, n_loans) * 0.4 + 0.8
+        losses[sim] = float(np.sum(eads * lgds * lgd_rand * defaults))
 
-        # Account-level losses (no LGD randomisation; use account LGD)
-        account_losses = defaults * lgds * eads  # shape (batch_n, n_accounts)
-        batch_losses = account_losses.sum(axis=1)
-        total_losses.extend(batch_losses.tolist())
+    sorted_losses = np.sort(losses)
+    var_dict: Dict[float, float] = {}
+    es_dict: Dict[float, float] = {}
+    for cl in cls:
+        idx = int(np.clip(np.floor(n_sims * cl), 0, n_sims - 1))
+        var_dict[cl] = float(sorted_losses[idx])
+        tail = sorted_losses[idx:]
+        es_dict[cl] = float(np.mean(tail)) if len(tail) > 0 else var_dict[cl]
 
-    losses = np.array(total_losses)
-
-    # ---- Compute risk metrics ----
-    mean_loss = float(np.mean(losses))
-    std_loss = float(np.std(losses, ddof=1))
-    var_999 = float(np.percentile(losses, 99.9))
-
-    # Expected Shortfall at 99.9%
-    tail_mask = losses >= var_999
-    tail_count = int(np.sum(tail_mask))
-    es_999 = float(np.mean(losses[tail_mask])) if tail_count > 0 else var_999
-
-    # Tail stability warning
-    warning_msg = None
-    if tail_count < 100:
-        warning_msg = (
-            f"WARNING: Only {tail_count} observations in 99.9% tail "
-            f"from {n_sims} simulations. Tail estimates may be unstable. "
-            f"Recommend n_sims >= 100,000 for reliable 99.9% ES."
-        )
-        warnings.warn(warning_msg)
-
+    el = float(np.mean(losses))
+    ul999 = float(var_dict.get(0.999, el + 3.09 * np.std(losses)))
+    ecap = max(ul999 - el, 0.0)
+    tail_count_999 = max(1, int(np.ceil(n_sims * (1.0 - 0.999))))
+    convergence = compute_convergence_diagnostics(losses)
     return {
-        "mean_loss": mean_loss,
-        "var_999": var_999,
-        "es_999": es_999,
-        "n_sims": n_sims,
-        "tail_observations_999": tail_count,
-        "tail_estimate_warning": warning_msg,
-        "copula_type": copula_type,
-        "t_df": t_df,
-        "batch_size": batch_size,
-        "std_loss": std_loss,
-        "losses": losses
+        "simulated_losses": losses,
+        "expected_loss": el,
+        "VaR": var_dict,
+        "Expected_Shortfall": es_dict,
+        "credit_ecap_999": float(ecap),
+        "credit_ecap_999_pct_ead": float(ecap / max(eads.sum(), 1.0)),
+        "loss_std": float(np.std(losses)),
+        "n_sims": int(n_sims),
+        "copula_type": copula_name,
+        "tail_observations_999": int(tail_count_999),
+        "tail_estimate_warning": bool(tail_count_999 < 100),
+        "convergence": convergence,
     }
 
 
-def compute_ecap_from_simulations(
-    credit_result: Dict[str, Any],
-    market_result: Dict[str, Any],
-    op_result: Dict[str, Any],
-    afr: float
-) -> Dict[str, Any]:
-    """
-    Aggregate simulated credit, market, and operational risk components
-    into total economic capital and coverage metrics.
+def compute_market_risk_ecap(
+    total_assets: float,
+    macro_conditions: Optional[Dict[str, float]] = None,
+    n_sims: int = 2000,
+    seed: int = 2025,
+) -> Dict[str, float]:
+    """FRTB-style Expected Shortfall 97.5% across 6 correlated market risk factors."""
+    rng = np.random.default_rng(seed)
+    mc = macro_conditions or {}
+    ls = float(mc.get("load_shedding_stage", 2)) / 8.0
+    sov = float(mc.get("sovereign_cds_change_bps", 0)) / 300.0
+    gdp = float(mc.get("gdp_yoy", 0.012))
+    stress_mult = 1.0 + 0.5 * ls + 0.4 * sov + 0.6 * max(0.0, 0.012 - gdp) * 10.0
 
-    Uses simulated components directly. Benchmark allocations are used
-    only as fallbacks for missing components, with method disclosed.
-    """
-    credit_ecap = credit_result.get("var_999", 0.0)
-    market_ecap = market_result.get("var_999", 0.0)
-    op_ecap = op_result.get("var_999", 0.0)
+    weights = np.array([0.30, 0.15, 0.15, 0.15, 0.12, 0.13], dtype=float)
+    vols = np.array([0.18, 0.12, 0.20, 0.22, 0.25, 0.10], dtype=float) * stress_mult
+    corr = np.full((6, 6), 0.35, dtype=float)
+    np.fill_diagonal(corr, 1.0)
+    L = np.linalg.cholesky(corr)
+    exposure = total_assets * 0.30
 
-    total_ecap = credit_ecap + market_ecap + op_ecap
+    pnls = np.zeros(n_sims, dtype=float)
+    for s in range(n_sims):
+        z = L @ rng.standard_normal(6)
+        ret = z * vols
+        pnls[s] = -exposure * float(np.sum(ret * weights))
 
-    # Add model risk multiplier (2% of subtotal per SA benchmark)
-    model_risk = total_ecap * 0.02
-    total_ecap_with_model = total_ecap + model_risk
-
-    # Stress buffer (10% of subtotal, excluding model risk)
-    stress_buffer = total_ecap * 0.10
-    total_ecap_required = total_ecap_with_model + stress_buffer
-
-    coverage_ratio = afr / total_ecap_required if total_ecap_required > 0 else float('inf')
-    surplus = afr - total_ecap_required
-
+    sorted_pnls = np.sort(pnls)
+    idx975 = int(np.floor(n_sims * 0.975))
+    idx99 = int(np.floor(n_sims * 0.99))
     return {
-        "credit_ecap": credit_ecap,
-        "market_ecap": market_ecap,
-        "op_ecap": op_ecap,
-        "model_risk": model_risk,
-        "stress_buffer": stress_buffer,
-        "total_ecap": total_ecap_required,
-        "afr": afr,
-        "coverage_ratio": coverage_ratio,
-        "surplus": surplus,
-        "allocation_method": "simulated_components_aggregated",
-        "benchmark_fallback_used": False
+        "market_ecap": float(max(np.mean(sorted_pnls[idx975:]), 0.0)),
+        "market_pnl_sims": pnls,
+        "market_VaR_99": float(sorted_pnls[idx99]),
+        "market_ES_975": float(np.mean(sorted_pnls[idx975:])),
     }
 
 
-# ---- Standalone test ----
-if __name__ == "__main__":
-    test_portfolio = [
-        {"pd": 0.02, "lgd": 0.40, "principal": 1e6, "undrawn": 0,      "segment": "Retail_Mortgage"},
-        {"pd": 0.05, "lgd": 0.60, "principal": 5e5, "undrawn": 1e5,  "segment": "SME_Corporate"},
-        {"pd": 0.01, "lgd": 0.20, "principal": 2e6, "undrawn": 0,      "segment": "Sovereign_Bank"},
-        {"pd": 0.08, "lgd": 0.80, "principal": 3e5, "undrawn": 5e4,  "segment": "Retail_CreditCard"},
-    ]
+def compute_operational_ecap(
+    total_assets: float,
+    n_scenarios: int = 50,
+    ls_stage: int = 2,
+    seed: int = 2026,
+) -> Dict[str, float]:
+    """Prototype operational-risk scenario simulation with loadshedding uplift.
 
-    print("=== Gaussian Copula (5k sims) ===")
-    res_g = simulate_copula_defaults(test_portfolio, n_sims=5000, seed=1, copula_type="gaussian")
-    print(f"Mean loss: R{res_g['mean_loss']:,.0f}")
-    print(f"VaR 99.9%: R{res_g['var_999']:,.0f}")
-    print(f"ES 99.9%:  R{res_g['es_999']:,.0f}")
-    print(f"Tail obs:  {res_g['tail_observations_999']}")
-    print(f"Warning:   {res_g['tail_estimate_warning']}")
+    This is not a claim to implement the Basel Standardised Measurement
+    Approach or any current supervisory operational-risk framework.
+    """
+    rng = np.random.default_rng(seed)
+    gi = total_assets * 0.035
+    factor = 1.0 + (float(ls_stage) / 8.0) * 0.6
 
-    print("\n=== T-Copula (5k sims, df=5) ===")
-    res_t = simulate_copula_defaults(test_portfolio, n_sims=5000, seed=1, copula_type="t", t_df=5)
-    print(f"Mean loss: R{res_t['mean_loss']:,.0f}")
-    print(f"VaR 99.9%: R{res_t['var_999']:,.0f}")
-    print(f"ES 99.9%:  R{res_t['es_999']:,.0f}")
-    print(f"Tail obs:  {res_t['tail_observations_999']}")
-    print(f"Warning:   {res_t['tail_estimate_warning']}")
-
-    print("\n=== Input Validation Tests ===")
-    try:
-        simulate_copula_defaults(test_portfolio, n_sims=-1)
-    except ValueError as e:
-        print(f"Caught invalid n_sims: {e}")
-
-    try:
-        simulate_copula_defaults(test_portfolio, copula_type="clayton")
-    except ValueError as e:
-        print(f"Caught invalid copula: {e}")
-
-    try:
-        simulate_copula_defaults(test_portfolio, copula_type="t", t_df=1.5)
-    except ValueError as e:
-        print(f"Caught invalid t_df: {e}")
-
-    print("\nAll tests passed.")
+    losses = []
+    for _ in range(n_scenarios):
+        freq = rng.poisson(lam=4 * factor)
+        sev = rng.pareto(a=1.8, size=freq) * gi * 0.008 if freq > 0 else np.zeros(1)
+        losses.append(float(sev.sum()))
+    losses_arr = np.array(losses, dtype=float)
+    sorted_loss = np.sort(losses_arr)
+    idx999 = int(np.clip(np.floor(n_scenarios * 0.999), 0, n_scenarios - 1))
+    var999 = float(sorted_loss[idx999])
+    ecap = max(var999 - float(np.mean(losses_arr)), 0.0)
+    return {
+        "operational_ecap": float(ecap),
+        "op_loss_sims": losses_arr,
+        "op_VaR_999": var999,
+    }
