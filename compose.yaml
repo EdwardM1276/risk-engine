@@ -1,0 +1,14 @@
+services:
+  dashboard:
+    build:
+      context: .
+    image: risk-engine-dashboard:local
+    init: true
+    ports:
+      - "8501:8501"
+    environment:
+      STREAMLIT_SERVER_MAXUPLOADSIZE: "200"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./data/raw:/app/data/raw:ro
+    restart: unless-stopped

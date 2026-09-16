@@ -1,0 +1,2 @@
+account_id,segment,institution_size,province,principal_outstanding,undrawn_limit,collateral_value,loan_to_value,tenure_years,months_on_book,dpd,debt_review_flag,judgement_flag,administration_order,loadshedding_vulnerability_score,internal_rating,base_segment_ccf,base_segment_ttc_pd,base_segment_lgd,base_segment_corr,source_bank,source_date
+FDIC_1_20251231,Corporate_Large,Large_D-SIB,US,50.0,0.0,50.0,1.0,1,12,0,False,False,False,1,BBB,0.65,0.02,0.4,0.24,Example,2025-12-31
