@@ -7,14 +7,33 @@ from run import ReproductionError, reproduce_run, run_engine_end_to_end
 
 
 class ReproducibilityTests(unittest.TestCase):
+    def test_material_inputs_change_digest(self):
+        base = run_engine_end_to_end(n_accounts=8, n_mc_sims=8, seed=11, as_of_date="2026-09-16")
+        changed = run_engine_end_to_end(
+            n_accounts=8, n_mc_sims=8, seed=11, total_exposure=400_000_000_000,
+            as_of_date="2026-09-16",
+        )
+        self.assertNotEqual(
+            base["run_metadata"]["config_digest"],
+            changed["run_metadata"]["config_digest"],
+        )
+
+    def test_invalid_requests_fail_before_execution(self):
+        with self.assertRaises(ValueError):
+            run_engine_end_to_end(n_accounts=0)
+        with self.assertRaises(ValueError):
+            run_engine_end_to_end(copula_type="t", t_df=2)
+
     def test_single_digest_field_changes_identity(self):
         snapshot = {
-            "scenario": "Base", "severity_multiplier": 1.0, "seed": 1,
+            "scenario": "Base", "total_exposure": 500_000_000_000.0,
+            "severity_multiplier": 1.0, "seed": 1,
             "institution_size": "Large_D-SIB", "n_accounts": 10, "n_mc_sims": 10,
             "copula_type": "t", "t_df": 6, "data_source": "synthetic",
             "idiosyncratic_shocks": {}, "as_of_date": "2026-09-16",
             "engine_params_version": "dev", "reference_data_versions": {"SA_POLICY": 2},
-            "nca_in_duplum_enabled": False,
+            "nca_in_duplum_enabled": False, "allow_synthetic_fallback": False,
+            "portfolio_path": None, "strict_data_validation": False,
         }
         first = config_digest(snapshot)
         snapshot["seed"] = 2

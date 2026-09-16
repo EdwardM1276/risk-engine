@@ -66,6 +66,35 @@ class ReproductionError(RuntimeError):
     """Raised when a stored run cannot be reproduced from its snapshot."""
 
 
+def _validate_run_inputs(
+    scenario: str,
+    total_exposure: float,
+    n_accounts: int,
+    severity_multiplier: float,
+    n_mc_sims: int,
+    copula_type: str,
+    t_df: int,
+    data_source: str,
+) -> None:
+    """Reject invalid run requests before writing data or snapshots."""
+    if scenario not in {"Base", "Adverse", "Severe"}:
+        raise ValueError("scenario must be Base, Adverse, or Severe")
+    if not np.isfinite(total_exposure) or total_exposure <= 0:
+        raise ValueError("total_exposure must be a positive finite number")
+    if n_accounts < 1:
+        raise ValueError("n_accounts must be at least 1")
+    if not np.isfinite(severity_multiplier) or severity_multiplier < 0:
+        raise ValueError("severity_multiplier must be a non-negative finite number")
+    if n_mc_sims < 1:
+        raise ValueError("n_mc_sims must be at least 1")
+    if copula_type not in {"t", "Gaussian"}:
+        raise ValueError("copula_type must be 't' or 'Gaussian'")
+    if copula_type == "t" and t_df <= 2:
+        raise ValueError("t_df must be greater than 2 for a t-copula")
+    if data_source not in {"synthetic", "public", "institutional"}:
+        raise ValueError("data_source must be synthetic, public, or institutional")
+
+
 def _runs_root() -> Path:
     return Path(__file__).resolve().parent / "outputs" / "runs"
 
@@ -144,6 +173,16 @@ def run_engine_end_to_end(
     Outputs are typed ``Dict[str, Any]`` with stable, documented keys consumed
     directly by the dashboard plotting layer.
     """
+    _validate_run_inputs(
+        scenario=scenario,
+        total_exposure=total_exposure,
+        n_accounts=n_accounts,
+        severity_multiplier=severity_multiplier,
+        n_mc_sims=n_mc_sims,
+        copula_type=copula_type,
+        t_df=t_df,
+        data_source=data_source,
+    )
     run_start = datetime.now(timezone.utc)
     business_date = date.fromisoformat(str(as_of_date)[:10]) if as_of_date is not None else date.today()
     reference_versions = {code: series.latest().version for code, series in load_rates().items()}
@@ -156,6 +195,7 @@ def run_engine_end_to_end(
         engine_version = "dev"
     snapshot = {
         "scenario": scenario,
+        "total_exposure": float(total_exposure),
         "severity_multiplier": float(severity_multiplier),
         "seed": int(seed),
         "institution_size": institution_size,
@@ -169,6 +209,9 @@ def run_engine_end_to_end(
         "engine_params_version": engine_version,
         "reference_data_versions": reference_versions,
         "nca_in_duplum_enabled": bool(config_params.NCA_IN_DUPLUM_ENABLED),
+        "allow_synthetic_fallback": bool(allow_synthetic_fallback),
+        "portfolio_path": portfolio_path,
+        "strict_data_validation": bool(strict_data_validation),
     }
     digest = config_digest(snapshot)
     run_id = _next_run_id(digest)
@@ -181,7 +224,7 @@ def run_engine_end_to_end(
         "strict_data_validation": strict_data_validation, "as_of_date": business_date.isoformat(),
         "t_df": t_df,
     }
-    snapshot_path = _persist_snapshot(run_id, snapshot)
+    snapshot_path = None
 
     # 1. Scenario expansion
     scenario_params: Dict[str, object] = get_scenario_parameters(
@@ -306,6 +349,8 @@ def run_engine_end_to_end(
     )
 
     run_end = datetime.now(timezone.utc)
+
+    snapshot_path = _persist_snapshot(run_id, snapshot)
 
     # Persist validated summary CSV for audit trail
     _write_run_summary_csv(

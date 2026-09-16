@@ -11,10 +11,11 @@ from typing import Any, Dict
 import numpy as np
 
 DIGEST_FIELDS = (
-    "scenario", "severity_multiplier", "seed", "institution_size",
+    "scenario", "total_exposure", "severity_multiplier", "seed", "institution_size",
     "n_accounts", "n_mc_sims", "copula_type", "t_df", "data_source",
     "idiosyncratic_shocks", "as_of_date", "engine_params_version",
-    "reference_data_versions", "nca_in_duplum_enabled",
+    "reference_data_versions", "nca_in_duplum_enabled", "allow_synthetic_fallback",
+    "portfolio_path", "strict_data_validation",
 )
 
 

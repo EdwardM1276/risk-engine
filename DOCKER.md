@@ -22,7 +22,9 @@ to remove the container.
 The Compose configuration mounts `outputs/` so run summaries persist on the
 host and mounts `data/raw/` read-only for locally managed source artifacts.
 Raw or institutional data is intentionally excluded from the image build
-context. Do not commit confidential extracts or credentials.
+context. Generated CSV/JSON artifacts under `data/raw/` are ignored by Git;
+the manifest may still be retained for provenance. Do not commit confidential
+extracts or credentials.
 
 ## Run a pipeline check
 

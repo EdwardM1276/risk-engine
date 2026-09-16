@@ -5,4 +5,7 @@ __pycache__/
 venv/
 outputs/*
 !.gitkeep
+data/cache/
+data/raw/*.csv
+data/raw/*.json
 
