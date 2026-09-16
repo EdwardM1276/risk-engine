@@ -358,22 +358,19 @@ Streamlit Cloud provides a convenient public demonstration environment. It is no
 **Problem:** Complex Plotly visuals crashed on certain tabs when data shapes or types did not match chart expectations.  
 **Resolution:** Chart helpers were changed to return simpler DataFrames, built-in Streamlit charts were used, and tab sections gained graceful fallback handling.
 
-### Challenge 4: Presentation quality and emoji cleanup
 
-**Problem:** The dashboard contained presentation noise and emoji characters that were inconsistent with the desired professional style.  
-**Resolution:** Dashboard text and styling were cleaned up, with a more restrained executive layout.
 
-### Challenge 5: Streamlit dependency deployment failure
+### Challenge 4: Streamlit dependency deployment failure
 
 **Problem:** Streamlit Cloud selected Python 3.14 and failed while building an older Pillow dependency pulled by the original package pins.  
 **Resolution:** The dependency specification was modernised to compatible version ranges, committed, and pushed. A runtime pin was also added during the troubleshooting process.
 
-### Challenge 6: Browser and shell environment differences
+### Challenge 5: Browser and shell environment differences
 
 **Problem:** Local PowerShell command execution was complicated by a Python-backed terminal session and Windows path escaping.  
 **Resolution:** Repository and deployment actions were performed through the active Python process and browser tools, with the repository and deployment state independently verified.
 
-### Challenge 7: Public-data acquisition and provenance
+### Challenge 6: Public-data acquisition and provenance
 
 **Problem:** The original acquisition boundary generated every macro, market, and portfolio observation synthetically, so downstream calculations could not be presented as evidence from observed banking data.
 

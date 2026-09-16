@@ -163,6 +163,11 @@ SICR_TRIGGERS: Dict[str, bool] = {
 
 NCA_THRESHOLDS: Dict[str, int] = {"dpd_stage2": 30, "dpd_stage3": 90}
 
+# Optional arithmetic-only NCA s103(5) recovery gate. Disabled preserves the
+# historical model behaviour until an approved legal policy enables it.
+NCA_IN_DUPLUM_ENABLED: bool = False
+BENCHMARK_TRANSITION_PD_UPLIFT: float = 0.05
+
 # -----------------------------------------------------------------------------
 # 9. Vasicek IRB correlation bounds (Reg 38)
 # -----------------------------------------------------------------------------

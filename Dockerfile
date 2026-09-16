@@ -1,19 +1,30 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-trixie
+
+# Keep the base tag current at build time and apply the latest Debian security
+# updates. The image should still be rebuilt regularly; this is not a substitute
+# for scanning the resulting image.
+ARG DEBIAN_FRONTEND=noninteractive
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHERUSAGESTATS=false
 
 WORKDIR /app
 
-RUN groupadd --system app && useradd --system --gid app --home-dir /app app
+RUN apt-get update \
+    && apt-get dist-upgrade -y --no-install-recommends \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir --upgrade -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel
 
 COPY --chown=app:app . .
 RUN mkdir -p /app/outputs /app/data/cache \

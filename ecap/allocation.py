@@ -7,6 +7,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from config.params import MODEL_RISK_ALLOCATION, NEDBANK_ECAP_BENCHMARK_2024
+from engine.money import post_sum
 
 
 def allocate_nedbank_ecap_benchmark(
@@ -53,7 +54,7 @@ def allocate_nedbank_ecap_benchmark(
     if operational_ecap_from_simulation is not None:
         op = max(float(operational_ecap_from_simulation), 0.0)
 
-    total_ecap = credit + market + op + business + model + stress
+    total_ecap = float(post_sum([credit, market, op, business, model, stress]))
     model_floor = total_ecap * MODEL_RISK_ALLOCATION
     if model < model_floor:
         shortfall = model_floor - model
@@ -61,7 +62,7 @@ def allocate_nedbank_ecap_benchmark(
         credit = max(credit - shortfall * 0.6, 0.0)
         stress = max(stress - shortfall * 0.4, 0.0)
 
-    total = credit + market + op + business + model + stress
+    total = float(post_sum([credit, market, op, business, model, stress]))
     return {
         "total_ecap": float(total),
         "benchmark_total_ecap": float(benchmark_total),

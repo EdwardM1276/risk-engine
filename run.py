@@ -12,7 +12,8 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
@@ -21,6 +22,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.params import NEDBANK_ECAP_BENCHMARK_2024, SA_BANK_BENCHMARKS_2024
+from config import params as config_params
+from config.reference_data import load_rates
 from data.acquisition import acquire_all_data, fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
 from ecap.allocation import allocate_nedbank_ecap_benchmark
 from ecap.copula_mc import (
@@ -43,6 +46,8 @@ from scenarios.stress_engine import (
     scenario_to_macro_conditions,
     scenario_to_market_data,
 )
+from engine.money import post_sum, round_post
+from engine.reproducibility import config_digest
 
 
 # -----------------------------------------------------------------------------
@@ -55,6 +60,50 @@ def _hash_idio_shocks(shocks: Optional[Dict[str, Any]]) -> str:
         return "NONE"
     ordered = sorted(shocks.items(), key=lambda kv: kv[0])
     return "|".join(f"{k}:{int(v) if isinstance(v, bool) else v}" for k, v in ordered)
+
+
+class ReproductionError(RuntimeError):
+    """Raised when a stored run cannot be reproduced from its snapshot."""
+
+
+def _runs_root() -> Path:
+    return Path(__file__).resolve().parent / "outputs" / "runs"
+
+
+def _next_run_id(digest: str) -> str:
+    summary_path = Path(__file__).resolve().parent / "outputs" / "latest_run_summary.csv"
+    prior = 0
+    if summary_path.exists():
+        try:
+            frame = pd.read_csv(summary_path)
+            if "config_digest" in frame:
+                prior = int((frame["config_digest"] == digest).sum())
+        except (OSError, ValueError, pd.errors.ParserError):
+            prior = 0
+    return f"{digest[:12]}-{prior + 1:03d}"
+
+
+def _persist_snapshot(run_id: str, snapshot: Dict[str, Any]) -> str:
+    path = _runs_root() / run_id / "snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, indent=2, default=str, sort_keys=True), encoding="utf-8")
+    return str(path)
+
+
+def reproduce_run(run_id: str) -> Dict[str, Any]:
+    """Re-execute a stored run and verify its input digest."""
+    snapshot_path = _runs_root() / run_id / "snapshot.json"
+    if not snapshot_path.exists():
+        raise ReproductionError(f"Snapshot not found for run {run_id}")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    stored_digest = config_digest(snapshot)
+    if stored_digest[:12] != run_id.split("-", 1)[0] and stored_digest != snapshot.get("config_digest"):
+        raise ReproductionError("Stored snapshot digest does not match its run identity")
+    params = dict(snapshot.get("run_params", {}))
+    result = run_engine_end_to_end(**params)
+    if result["run_metadata"]["config_digest"] != stored_digest:
+        raise ReproductionError("Recomputed configuration digest does not match stored snapshot")
+    return result
 
 
 # -----------------------------------------------------------------------------
@@ -75,6 +124,8 @@ def run_engine_end_to_end(
     allow_synthetic_fallback: bool = False,
     portfolio_path: Optional[str] = None,
     strict_data_validation: bool = False,
+    as_of_date=None,
+    t_df: int = 6,
 ) -> Dict[str, Any]:
     """Execute the complete engine pipeline.
 
@@ -93,12 +144,50 @@ def run_engine_end_to_end(
     Outputs are typed ``Dict[str, Any]`` with stable, documented keys consumed
     directly by the dashboard plotting layer.
     """
-    run_start = datetime.now()
+    run_start = datetime.now(timezone.utc)
+    business_date = date.fromisoformat(str(as_of_date)[:10]) if as_of_date is not None else date.today()
+    reference_versions = {code: series.latest().version for code, series in load_rates().items()}
+    try:
+        engine_version = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        engine_version = "dev"
+    snapshot = {
+        "scenario": scenario,
+        "severity_multiplier": float(severity_multiplier),
+        "seed": int(seed),
+        "institution_size": institution_size,
+        "n_accounts": int(n_accounts),
+        "n_mc_sims": int(n_mc_sims),
+        "copula_type": copula_type,
+        "t_df": int(t_df),
+        "data_source": data_source,
+        "idiosyncratic_shocks": idiosyncratic_shocks or {},
+        "as_of_date": business_date,
+        "engine_params_version": engine_version,
+        "reference_data_versions": reference_versions,
+        "nca_in_duplum_enabled": bool(config_params.NCA_IN_DUPLUM_ENABLED),
+    }
+    digest = config_digest(snapshot)
+    run_id = _next_run_id(digest)
+    snapshot["run_params"] = {
+        "scenario": scenario, "total_exposure": total_exposure, "n_accounts": n_accounts,
+        "seed": seed, "institution_size": institution_size, "severity_multiplier": severity_multiplier,
+        "idiosyncratic_shocks": idiosyncratic_shocks, "n_mc_sims": n_mc_sims,
+        "copula_type": copula_type, "data_source": data_source,
+        "allow_synthetic_fallback": allow_synthetic_fallback, "portfolio_path": portfolio_path,
+        "strict_data_validation": strict_data_validation, "as_of_date": business_date.isoformat(),
+        "t_df": t_df,
+    }
+    snapshot_path = _persist_snapshot(run_id, snapshot)
 
     # 1. Scenario expansion
     scenario_params: Dict[str, object] = get_scenario_parameters(
         scenario, severity_multiplier, seed
     )
+    scenario_params["as_of_date"] = business_date
     if idiosyncratic_shocks:
         cust = create_idiosyncratic_scenario(**idiosyncratic_shocks, seed=seed)
         for k, v in cust.items():
@@ -116,6 +205,7 @@ def run_engine_end_to_end(
         data_source=data_source,
         allow_synthetic_fallback=allow_synthetic_fallback,
         portfolio_path=portfolio_path,
+        as_of_date=business_date,
     )
     portfolio = raw_data["portfolio"]
     if strict_data_validation and not raw_data["data_quality"].get("validation_ready", False):
@@ -128,12 +218,14 @@ def run_engine_end_to_end(
     ifrs9_df: pd.DataFrame = run_full_ifrs9_pipeline(
         portfolio, macro_cond, mkt_data, forecast_horizon_months=12
     )
-    ecl_total = float(ifrs9_df["ecl"].sum())
-    ecl_12m_total = float(ifrs9_df["12m_ecl"].sum())
-    ecl_lifetime_total = float(ifrs9_df["lifetime_ecl"].sum())
-    ecl_by_stage_raw = ifrs9_df.groupby("ifrs9_stage")["ecl"].sum().to_dict()
-    ecl_by_stage: Dict[int, float] = {int(k): float(v) for k, v in ecl_by_stage_raw.items()}
-    ead_total = float(ifrs9_df["ead"].sum())
+    ecl_total = float(post_sum(ifrs9_df["ecl"].tolist()))
+    ecl_12m_total = float(post_sum(ifrs9_df["12m_ecl"].tolist()))
+    ecl_lifetime_total = float(post_sum(ifrs9_df["lifetime_ecl"].tolist()))
+    ecl_by_stage: Dict[int, float] = {
+        int(stage): float(post_sum(group["ecl"].tolist()))
+        for stage, group in ifrs9_df.groupby("ifrs9_stage")
+    }
+    ead_total = float(post_sum(ifrs9_df["ead"].tolist()))
 
     # Stage distribution keys are normalised to ints (1, 2, 3)
     stage_dist_raw = ifrs9_df["ifrs9_stage"].value_counts().sort_index().to_dict()
@@ -156,7 +248,7 @@ def run_engine_end_to_end(
         ifrs9_df,
         n_sims=n_mc_sims,
         copula_type=copula_type,
-        t_df=6,
+        t_df=t_df,
         confidence_levels=[0.90, 0.95, 0.975, 0.99, 0.999],
         macro_conditions=macro_cond,
         seed=seed,
@@ -213,13 +305,17 @@ def run_engine_end_to_end(
         ifrs9_df, regcap_analysis, ecap_alloc, credit_mc, coverage
     )
 
-    run_end = datetime.now()
+    run_end = datetime.now(timezone.utc)
 
     # Persist validated summary CSV for audit trail
     _write_run_summary_csv(
         scenario, severity_multiplier, institution_size, ecl_total,
         total_rwa, ecap_alloc["total_ecap"], coverage["Coverage Ratio"],
         stage_distribution,
+        run_id=run_id,
+        config_digest_value=digest,
+        snapshot_path=snapshot_path,
+        as_of_date=business_date,
     )
 
     return {
@@ -235,6 +331,11 @@ def run_engine_end_to_end(
             "data_source": data_source,
             "synthetic_fallback_used": bool(raw_data["data_quality"].get("synthetic_fallback_used", False)),
             "idio_hash": _hash_idio_shocks(idiosyncratic_shocks),
+            "run_id": run_id,
+            "config_digest": digest,
+            "as_of_date": business_date,
+            "recorded_at": run_start,
+            "snapshot_path": snapshot_path,
         },
         "scenario": {
             "parameters": scenario_params,
@@ -393,6 +494,10 @@ def _write_run_summary_csv(
     total_ecap: float,
     coverage_ratio: float,
     stage_distribution: Dict[int, int],
+    run_id: Optional[str] = None,
+    config_digest_value: Optional[str] = None,
+    snapshot_path: Optional[str] = None,
+    as_of_date=None,
 ) -> None:
     """Append a single-row summary to outputs/latest_runs.csv for audit trail."""
     try:
@@ -408,12 +513,16 @@ def _write_run_summary_csv(
 
         row = pd.DataFrame([{
             "run_timestamp": datetime.now().isoformat(timespec="seconds"),
+            "run_id": run_id,
+            "config_digest": config_digest_value,
+            "snapshot_path": snapshot_path,
+            "as_of_date": str(as_of_date) if as_of_date is not None else None,
             "scenario": scenario,
             "severity_multiplier": f"{severity:.2f}",
             "institution_size": institution_size,
-            "ecl_total_zar": f"{ecl_total:.2f}",
-            "total_rwa_zar": f"{total_rwa:.2f}",
-            "total_ecap_zar": f"{total_ecap:.2f}",
+            "ecl_total_zar": str(round_post(ecl_total)),
+            "total_rwa_zar": str(round_post(total_rwa)),
+            "total_ecap_zar": str(round_post(total_ecap)),
             "coverage_ratio": f"{coverage_ratio:.4f}",
             "stage1_pct_accounts": f"{s1/n*100:.2f}",
             "stage2_pct_accounts": f"{s2/n*100:.2f}",
@@ -457,6 +566,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--allow-synthetic-fallback", action="store_true")
     pipeline_parser.add_argument("--portfolio-path", help="CSV/XLSX anonymized institutional portfolio extract")
     pipeline_parser.add_argument("--strict-data-validation", action="store_true")
+    pipeline_parser.add_argument("--as-of-date", help="Business as-of date (YYYY-MM-DD)")
 
     benchmark_parser = subparsers.add_parser("data-benchmark", help="Benchmark against observed public loan data")
     benchmark_parser.add_argument("--dataset", default="uci-credit-card", choices=["uci-credit-card"])
@@ -478,6 +588,7 @@ def _run_pipeline_command(args: argparse.Namespace) -> int:
         allow_synthetic_fallback=args.allow_synthetic_fallback,
         portfolio_path=args.portfolio_path,
         strict_data_validation=args.strict_data_validation,
+        as_of_date=args.as_of_date,
     )
     summary = {
         "scenario": args.scenario,
@@ -487,6 +598,8 @@ def _run_pipeline_command(args: argparse.Namespace) -> int:
         "total_ecap": result["economic_capital"]["total_ecap"],
         "coverage_ratio": result["coverage"]["main"]["Coverage Ratio"],
         "duration_seconds": result["run_metadata"]["duration_seconds"],
+        "run_id": result["run_metadata"]["run_id"],
+        "config_digest": result["run_metadata"]["config_digest"],
     }
     print(json.dumps(summary, indent=2, default=str))
     return 0

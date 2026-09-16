@@ -9,20 +9,47 @@ Implements:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Dict
 
 import numpy as np
 import pandas as pd
 
+from config import params
 from config.params import NCA_THRESHOLDS, SICR_TRIGGERS
+
+
+def effective_lgd_with_cap(
+    lgd: float | Decimal,
+    episode,
+    months_in_default: int | float,
+    annual_arrears_rate: float | Decimal,
+) -> Decimal:
+    """Approximate effective LGD after capped controlled accruals.
+
+    This first-order approximation assumes uncapped controlled accrual of
+    ``P * rate * time`` and increases LGD by the recovery lost when the
+    in-duplum cap binds. A proper cash-flow recovery engine remains required
+    for production use.
+    """
+    base_lgd = Decimal(str(lgd))
+    principal = Decimal(str(episode.principal_at_default))
+    uncapped = principal * Decimal(str(annual_arrears_rate)) * Decimal(str(months_in_default)) / Decimal("12")
+    capped = min(uncapped, principal)
+    lost_recovery = max(Decimal("0"), uncapped - capped)
+    recovery_adjustment = lost_recovery / max(principal, Decimal("1"))
+    return min(Decimal("0.99"), max(Decimal("0"), base_lgd + (Decimal("1") - base_lgd) * recovery_adjustment))
 
 
 def assign_ifrs9_staging(
     portfolio_df: pd.DataFrame,
     macro_conditions: Dict[str, float],
+    as_of_date=None,
 ) -> pd.DataFrame:
     """Assign IFRS9 stages: Stage1=Performing, Stage2=SICR, Stage3=Credit Impaired."""
     result = portfolio_df.copy()
+    if "value_date" not in result.columns and as_of_date is not None:
+        result["value_date"] = as_of_date
     ls_stage = float(macro_conditions.get("load_shedding_stage", 2))
     gdp_yoy = float(macro_conditions.get("gdp_yoy", 0.0))
 
@@ -113,9 +140,24 @@ def calculate_ecl(
     ead = result["ead"].values.astype(float)
     pit = result["pit_pd_12m"].values.astype(float)
     life = result["lifetime_pd"].values.astype(float)
-    lgd = result["lgd"].values.astype(float)
-    dlgd = result["downturn_lgd"].values.astype(float)
+    lgd = result["lgd"].values.astype(float).copy()
+    dlgd = result["downturn_lgd"].values.astype(float).copy()
     stage = result["ifrs9_stage"].values.astype(int)
+
+    if params.NCA_IN_DUPLUM_ENABLED and "default_episode" in result.columns:
+        episodes = result["default_episode"].tolist()
+        dpd_values = result.get("dpd", pd.Series(0, index=result.index)).to_numpy()
+        rates = result.get(
+            "annual_arrears_rate",
+            pd.Series(0.12, index=result.index),
+        ).to_numpy()
+        for index, episode in enumerate(episodes):
+            if stage[index] != 3 or episode is None:
+                continue
+            months = max(float(dpd_values[index]) / 30.0, 1.0)
+            effective = float(effective_lgd_with_cap(lgd[index], episode, months, rates[index]))
+            lgd[index] = effective
+            dlgd[index] = max(dlgd[index], effective)
 
     ecl_12 = ead * pit * lgd
     ecl_life = ead * life * lgd
@@ -128,6 +170,7 @@ def calculate_ecl(
     result["ecl"] = ecl_applied
     result["ecl_horizon_applied"] = hor
     result["downturn_ecl"] = downturn_applied
+    result["effective_lgd"] = lgd
     return result
 
 

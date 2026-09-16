@@ -358,6 +358,7 @@ def load_institutional_portfolio(
     if (frame["principal_outstanding"] <= 0).any():
         raise ValueError("Institutional portfolio contains non-positive principal")
     frame["observation_date"] = pd.to_datetime(frame["observation_date"], errors="raise")
+    frame["value_date"] = frame["observation_date"].dt.date
     if frame.duplicated(["account_id", "observation_date"]).any():
         raise ValueError("Institutional portfolio contains duplicate account-period keys")
     return frame
@@ -582,6 +583,7 @@ def normalize_fdic_portfolio(
             "base_segment_corr": PORTFOLIO_SEGMENTS["Corporate_Large"]["corr"],
             "source_bank": record["bank_name"],
             "source_date": record["date"],
+            "value_date": pd.Timestamp(record["date"]).date(),
         })
     return pd.DataFrame(rows)
 
@@ -641,6 +643,7 @@ def generate_sa_loan_portfolio(
     n_accounts: int = 5000,
     seed: int = 2024,
     institution_size: str = "Large_D-SIB",
+    as_of_date=None,
 ) -> pd.DataFrame:
     """Generate a realistic SA multi-segment loan book.
 
@@ -649,6 +652,7 @@ def generate_sa_loan_portfolio(
     and internal rating (AAA to CCC).
     """
     rng = np.random.default_rng(seed)
+    value_date = pd.Timestamp(as_of_date).date() if as_of_date is not None else datetime.now().date()
     accounts: List[Dict] = []
     for seg, seg_params in PORTFOLIO_SEGMENTS.items():
         n_seg = max(1, int(n_accounts * seg_params["weight"]))
@@ -724,6 +728,7 @@ def generate_sa_loan_portfolio(
 
             accounts.append({
                 "segment": seg,
+                "value_date": value_date,
                 "institution_size": institution_size,
                 "province": province,
                 "principal_outstanding": float(principal),
@@ -759,6 +764,7 @@ def acquire_all_data(
     allow_synthetic_fallback: bool = False,
     portfolio_path: Optional[str] = None,
     acquisition_config: Optional[AcquisitionConfig] = None,
+    as_of_date=None,
 ) -> RawDataset:
     """Acquire a validated bundle from synthetic or public sources.
 
@@ -799,14 +805,14 @@ def acquire_all_data(
             macro = fetch_sarb_macro_data(periods, seed)
             ls = fetch_eskom_loadshedding(periods, seed)
             mkts = fetch_jse_market_data(periods, seed)
-            portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size)
+            portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size, as_of_date)
             merged_ts = macro.merge(ls, on="date", how="inner").merge(mkts, on="date", how="inner")
             source_notes = {"all": "Synthetic fallback used after public acquisition failure"}
     else:
         macro = fetch_sarb_macro_data(periods, seed)
         ls = fetch_eskom_loadshedding(periods, seed)
         mkts = fetch_jse_market_data(periods, seed)
-        portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size)
+        portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size, as_of_date)
         merged_ts = macro.merge(ls, on="date", how="inner").merge(mkts, on="date", how="inner")
         source_notes = {"all": "Synthetic research generator"}
 

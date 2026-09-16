@@ -1,0 +1,45 @@
+name: Container security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Audit Python dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pip-audit
+          pip-audit -r requirements.txt
+
+  image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          pull: true
+          tags: risk-engine-dashboard:ci
+      - name: Scan image for fixable high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: risk-engine-dashboard:ci
+          format: table
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: "1"

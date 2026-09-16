@@ -6,9 +6,21 @@ services:
     init: true
     ports:
       - "8501:8501"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
     environment:
       STREAMLIT_SERVER_MAXUPLOADSIZE: "200"
     volumes:
       - ./outputs:/app/outputs
       - ./data/raw:/app/data/raw:ro
+      - dashboard-cache:/app/data/cache
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     restart: unless-stopped
+
+volumes:
+  dashboard-cache:

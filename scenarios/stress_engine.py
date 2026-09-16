@@ -7,12 +7,14 @@ All shock labels and display formatting are plain-text only with no emoji glyphs
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Dict
 
 import numpy as np
 import pandas as pd
 
-from config.params import SARB_STRESS_SCENARIOS
+from config.params import BENCHMARK_TRANSITION_PD_UPLIFT, SARB_STRESS_SCENARIOS
+from config.reference_data import get_rate
 
 
 # -----------------------------------------------------------------------------
@@ -42,7 +44,7 @@ def get_scenario_parameters(
     params: Dict[str, object] = {}
     for key, value in base.items():
         if isinstance(value, tuple) and len(value) == 2:
-            low, high = value
+            low, high = sorted((float(value[0]), float(value[1])))
             if "growth" in key or "change" in key:
                 v = float(rng.uniform(low, high) * severity_multiplier)
             else:
@@ -83,14 +85,27 @@ def scenario_to_macro_conditions(scenario_params: Dict[str, object]) -> Dict[str
     cpi = _to_float(scenario_params.get("inflation", 0.05), 0.05)
     unemp_delta = _to_float(scenario_params.get("unemployment_change", 0.0), 0.0)
     ls = _to_int(scenario_params.get("load_shedding_stage", 2), 2)
+    reference_policy_rate = None
+    if scenario_params.get("as_of_date") is not None:
+        query_date = scenario_params["as_of_date"]
+        if not isinstance(query_date, date):
+            query_date = date.fromisoformat(str(query_date)[:10])
+        reference_policy_rate = float(get_rate("SA_POLICY", query_date).value) / 100.0
 
-    return {
+    conditions = {
         "repo_rate": 0.0775 + repo_adj if abs(repo_adj) < 0.5 else repo_adj,
         "gdp_yoy": gdp,
         "cpi_yoy": 0.05 + (cpi - 0.05),
         "unemployment_rate": 0.32 + unemp_delta,
         "load_shedding_stage": int(np.clip(ls, 0, 8)),
+        "benchmark_transition": bool(scenario_params.get("benchmark_transition", False)),
+        "benchmark_transition_effective_from": scenario_params.get("effective_from"),
+        "as_of_date": scenario_params.get("as_of_date"),
+        "benchmark_transition_pd_uplift": BENCHMARK_TRANSITION_PD_UPLIFT,
     }
+    if reference_policy_rate is not None:
+        conditions["reference_policy_rate"] = reference_policy_rate
+    return conditions
 
 
 def scenario_to_market_data(scenario_params: Dict[str, object]) -> Dict[str, float]:
@@ -128,6 +143,8 @@ def create_idiosyncratic_scenario(
     cyber_incident: bool = False,
     housing_crash: bool = False,
     smes_failure_wave: bool = False,
+    benchmark_transition: bool = False,
+    effective_from=None,
     seed: int = 2024,
 ) -> Dict[str, object]:
     """Compose idiosyncratic shock layers over an Adverse base scenario.
@@ -180,6 +197,12 @@ def create_idiosyncratic_scenario(
         base["unemployment_change"] = max(
             float(base.get("unemployment_change", 0.0)), 0.06
         )
+
+    if benchmark_transition:
+        base["benchmark_transition"] = True
+        base["benchmark_transition_pd_uplift"] = BENCHMARK_TRANSITION_PD_UPLIFT
+        if effective_from is not None:
+            base["effective_from"] = effective_from
         base["load_shedding_stage"] = (
             max(base["load_shedding_stage"][0], 5),
             max(base["load_shedding_stage"][1], 7),

@@ -605,6 +605,10 @@ def main():
                     "copula_type": result["run_metadata"]["copula_type"],
                     "duration_seconds": round(result["run_metadata"]["duration_seconds"], 3),
                     "run_start": str(result["run_metadata"]["run_start"]),
+                    "run_id": result["run_metadata"].get("run_id"),
+                    "config_digest": result["run_metadata"].get("config_digest"),
+                    "as_of_date": str(result["run_metadata"].get("as_of_date")),
+                    "recorded_at": str(result["run_metadata"].get("recorded_at")),
                 }
             })
 

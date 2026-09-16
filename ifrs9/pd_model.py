@@ -9,12 +9,14 @@ macro drivers (GDP gap, unemployment gap, loadshedding stage).
 from __future__ import annotations
 
 from typing import Dict
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
 from config.params import (
+    BENCHMARK_TRANSITION_PD_UPLIFT,
     PORTFOLIO_SEGMENTS,
     RATING_DEFAULT_PDS,
     RATING_TO_IDX,
@@ -96,6 +98,17 @@ def convert_ttc_to_pit(
     dpd_arr = result["dpd"].values.astype(int)
     debt_arr = result["debt_review_flag"].values.astype(bool)
     judge_arr = result["judgement_flag"].values.astype(bool)
+    admin_arr = result.get(
+        "administration_order",
+        pd.Series(False, index=result.index),
+    ).values.astype(bool)
+    transition_enabled = bool(macro_conditions.get("benchmark_transition", False))
+    as_of = macro_conditions.get("as_of_date")
+    effective_from = macro_conditions.get("benchmark_transition_effective_from")
+    if transition_enabled and effective_from is not None and as_of is not None:
+        as_of_date = as_of.date() if isinstance(as_of, datetime) else (as_of if isinstance(as_of, date) else date.fromisoformat(str(as_of)[:10]))
+        effective_date = effective_from.date() if isinstance(effective_from, datetime) else (effective_from if isinstance(effective_from, date) else date.fromisoformat(str(effective_from)[:10]))
+        transition_enabled = as_of_date >= effective_date
 
     pit_12m = np.zeros(len(result), dtype=float)
     life_pd = np.zeros(len(result), dtype=float)
@@ -146,6 +159,12 @@ def convert_ttc_to_pit(
             life = np.clip(life * 1.6, life, 0.999)
         elif dpd >= 30:
             pit = np.clip(pit * 1.4, pit, 0.999)
+
+        # First-order repricing-basis proxy. Stage 3 accounts are already
+        # credit-impaired and are deliberately not uplifted here.
+        if transition_enabled and "Retail" in seg and not (dpd >= 90 or judge or debt or admin_arr[idx]):
+            pit = np.clip(pit * (1.0 + BENCHMARK_TRANSITION_PD_UPLIFT), 1e-4, 0.999)
+            life = np.clip(life * (1.0 + BENCHMARK_TRANSITION_PD_UPLIFT), pit, 0.999)
 
         ci[idx] = np.clip(
             norm.ppf(np.clip(pit, 1e-6, 1 - 1e-6)) - norm.ppf(np.clip(ttc, 1e-6, 1 - 1e-6)),
