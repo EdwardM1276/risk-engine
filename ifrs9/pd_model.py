@@ -25,6 +25,22 @@ from config.params import (
 
 N_STATES: int = 8
 
+PD_FLOOR: float = 5e-5
+PD_CAP: float = 0.99
+
+
+def logit_pit_transform(ttc_pd: float | np.ndarray, multiplier: float | np.ndarray) -> np.ndarray:
+    """Convert a TTC PD to a PIT PD by shifting in logit space.
+
+    logit(PIT) = logit(TTC) + ln(multiplier), so the PIT PD is smoothly
+    bounded in (PD_FLOOR, PD_CAP) regardless of the stress multiplier.
+    """
+    p = np.clip(np.asarray(ttc_pd, dtype=float), PD_FLOOR, PD_CAP)
+    m = np.clip(np.asarray(multiplier, dtype=float), 1e-3, None)
+    z = np.log(p / (1.0 - p)) + np.log(m)
+    pit = 1.0 / (1.0 + np.exp(-z))
+    return np.clip(pit, PD_FLOOR, PD_CAP)
+
 
 def build_markov_transition_matrix(macro_conditions: Dict[str, float]) -> np.ndarray:
     """Return an (8 x 8) row-stochastic transition matrix for a given macro state."""
@@ -141,24 +157,24 @@ def convert_ttc_to_pit(
         dist = np.zeros(N_STATES, dtype=float)
         dist[start_idx] = 1.0
         default_12m = 0.0
-        default_life = 0.0
         for p in range(n_life):
             dist = dist @ trans
             if p < n_12m:
                 default_12m = dist[-1]
-            default_life = dist[-1]
 
         ttc = ttc_pd_arr[idx]
         pd_ratio = default_12m / max(ttc, 1e-6)
-        pit = np.clip(ttc * mult * (0.4 + 0.6 * pd_ratio), 1e-4, 0.999)
-        life = np.clip(pit * (1 + 0.6 * (n_life - n_12m)), pit, 0.999)
+        pit = float(logit_pit_transform(ttc, mult * (0.4 + 0.6 * pd_ratio)))
+        life = float(logit_pit_transform(pit, 1.0 + 0.6 * (n_life - n_12m)))
+        life = max(life, pit)
 
         dpd, debt, judge = dpd_arr[idx], debt_arr[idx], judge_arr[idx]
         if dpd >= 90 or judge or debt:
-            pit = np.clip(pit * 2.5, pit, 0.999)
-            life = np.clip(life * 1.6, life, 0.999)
+            pit = max(float(logit_pit_transform(pit, 2.5)), pit)
+            life = max(float(logit_pit_transform(life, 1.6)), life, pit)
         elif dpd >= 30:
-            pit = np.clip(pit * 1.4, pit, 0.999)
+            pit = max(float(logit_pit_transform(pit, 1.4)), pit)
+            life = max(life, pit)
 
         # First-order repricing-basis proxy. Stage 3 accounts are already
         # credit-impaired and are deliberately not uplifted here.

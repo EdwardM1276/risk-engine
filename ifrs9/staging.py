@@ -4,7 +4,7 @@ Implements:
     - Backstop triggers: NCA 30/90 dpd, debt review, judgement, admin order
     - Quantitative SICR: 3x, 2.5x, +225bps thresholds per rating bucket
     - Qualitative SICR: SME loadshedding cashflow indicator, sub-investment rating
-    - ECL: 12-month for S1/S2, lifetime for S3
+    - ECL: 12-month for Stage 1, lifetime for Stage 2 and Stage 3
 """
 
 from __future__ import annotations
@@ -51,8 +51,6 @@ def assign_ifrs9_staging(
     if "value_date" not in result.columns and as_of_date is not None:
         result["value_date"] = as_of_date
     ls_stage = float(macro_conditions.get("load_shedding_stage", 2))
-    gdp_yoy = float(macro_conditions.get("gdp_yoy", 0.0))
-
 
     dpd = result["dpd"].values.astype(int)
     debt = result["debt_review_flag"].values.astype(bool)
@@ -161,9 +159,9 @@ def calculate_ecl(
 
     ecl_12 = ead * pit * lgd
     ecl_life = ead * life * lgd
-    ecl_applied = np.where(stage == 3, ecl_life, ecl_12)
-    hor = np.where(stage == 3, "Lifetime", "12-month PIT")
-    downturn_applied = np.where(stage == 3, ead * life * dlgd, ead * pit * dlgd)
+    ecl_applied = np.where(stage >= 2, ecl_life, ecl_12)
+    hor = np.where(stage >= 2, "Lifetime", "12-month PIT")
+    downturn_applied = np.where(stage >= 2, ead * life * dlgd, ead * pit * dlgd)
 
     result["12m_ecl"] = ecl_12
     result["lifetime_ecl"] = ecl_life

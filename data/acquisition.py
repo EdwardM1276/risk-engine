@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -662,7 +661,6 @@ def generate_sa_loan_portfolio(
         is_retail = seg.startswith("Retail")
         is_sme = "SME" in seg
         is_corp = "Corporate" in seg and not is_sme
-        is_sov = "Sovereign" in seg
 
         for _ in range(n_seg):
             principal = avg_exposure * rng.lognormal(0, 0.8)
@@ -752,6 +750,46 @@ def generate_sa_loan_portfolio(
     df = pd.DataFrame(accounts)
     df.insert(0, "account_id", [f"ACC_{i + 1:06d}" for i in range(len(df))])
     return df
+
+
+# Monetary columns rescaled together so exposure, collateral, and provision
+# amounts stay internally consistent when the book is scaled to a target size.
+MONETARY_COLUMNS: List[str] = [
+    "principal_outstanding", "undrawn_limit", "credit_limit",
+    "collateral_value", "ead", "12m_ecl", "lifetime_ecl", "ecl", "downturn_ecl",
+]
+
+
+def scale_portfolio_by_factor(portfolio_df: pd.DataFrame, factor: float) -> pd.DataFrame:
+    """Scale all monetary columns by a fixed factor, recording it in
+    ``df.attrs['exposure_scaling_factor']`` for auditability."""
+    if factor <= 0:
+        raise ValueError("Scaling factor must be positive")
+    df = portfolio_df.copy()
+    for col in MONETARY_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype(float) * float(factor)
+    df.attrs["exposure_scaling_factor"] = float(factor)
+    return df
+
+
+def scale_portfolio_to_target(
+    portfolio_df: pd.DataFrame,
+    target_exposure: float,
+    exposure_col: str = "ead",
+) -> pd.DataFrame:
+    """Scale all monetary columns so ``exposure_col`` sums to ``target_exposure``.
+
+    Applied after the EAD model so the final modelled EAD (post-CCF) matches
+    the requested portfolio size exactly. The scaling factor is recorded in
+    ``df.attrs['exposure_scaling_factor']`` for auditability.
+    """
+    if exposure_col not in portfolio_df.columns:
+        raise KeyError(f"Portfolio is missing exposure column '{exposure_col}'")
+    actual = float(portfolio_df[exposure_col].sum())
+    if actual <= 0:
+        raise ValueError("Portfolio exposure must be positive before scaling")
+    return scale_portfolio_by_factor(portfolio_df, float(target_exposure) / actual)
 
 
 def acquire_all_data(

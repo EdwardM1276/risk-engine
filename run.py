@@ -21,10 +21,27 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config.params import NEDBANK_ECAP_BENCHMARK_2024, SA_BANK_BENCHMARKS_2024
+from config.params import (
+    BANK_BENCHMARK_PROFILES,
+    DEFAULT_BANK_PROFILE,
+    NEDBANK_ECAP_BENCHMARK_2024,
+    SA_BANK_BENCHMARKS_2024,
+)
 from config import params as config_params
 from config.reference_data import load_rates
-from data.acquisition import acquire_all_data, fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
+from data.acquisition import (
+    acquire_all_data,
+    fetch_uci_credit_card_defaults,
+    scale_portfolio_by_factor,
+    scale_portfolio_to_target,
+    summarize_uci_default_benchmark,
+)
+from data.calibration import (
+    apply_pd_calibration,
+    calibrate_ecl_to_target,
+    calibration_targets_for_profile,
+    solve_lgd_calibration_factor,
+)
 from ecap.allocation import allocate_nedbank_ecap_benchmark
 from ecap.copula_mc import (
     compute_market_risk_ecap,
@@ -68,7 +85,7 @@ class ReproductionError(RuntimeError):
 
 def _validate_run_inputs(
     scenario: str,
-    total_exposure: float,
+    total_exposure: Optional[float],
     n_accounts: int,
     severity_multiplier: float,
     n_mc_sims: int,
@@ -79,7 +96,7 @@ def _validate_run_inputs(
     """Reject invalid run requests before writing data or snapshots."""
     if scenario not in {"Base", "Adverse", "Severe"}:
         raise ValueError("scenario must be Base, Adverse, or Severe")
-    if not np.isfinite(total_exposure) or total_exposure <= 0:
+    if total_exposure is not None and (not np.isfinite(total_exposure) or total_exposure <= 0):
         raise ValueError("total_exposure must be a positive finite number")
     if n_accounts < 1:
         raise ValueError("n_accounts must be at least 1")
@@ -141,7 +158,7 @@ def reproduce_run(run_id: str) -> Dict[str, Any]:
 
 def run_engine_end_to_end(
     scenario: str = "Base",
-    total_exposure: float = 500_000_000_000.0,
+    total_exposure: Optional[float] = None,
     n_accounts: int = 2000,
     seed: int = 2024,
     institution_size: str = "Large_D-SIB",
@@ -155,6 +172,8 @@ def run_engine_end_to_end(
     strict_data_validation: bool = False,
     as_of_date=None,
     t_df: int = 6,
+    bank_profile: str = DEFAULT_BANK_PROFILE,
+    d_sib_bucket: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute the complete engine pipeline.
 
@@ -162,16 +181,21 @@ def run_engine_end_to_end(
         1. Scenario parameter expansion + idiosyncratic overlay
         2. Data acquisition / synthetic portfolio generation
         3. IFRS 9 (PD PIT conversion, LGD, EAD, Staging, ECL)
-        4. RWA engine (Vasicek ASRF IRB + Standardised fallback + FRTB + OpRisk)
-        5. RegCap stack + capital resources + MDA trigger ratios
+        3b. EAD scaling to the target book size + benchmark calibration
+            (ECL/EAD ~1.5%, credit RWA density from the selected profile)
+        4. RWA engine (Vasicek ASRF IRB + standardised path + output floor)
+        5. RegCap stack (tiered D-SIB buffers, leverage) + ratios
         6. Gaussian / t-copula Monte Carlo for credit VaR / ES
         7. Market (ES 97.5) and operational (Pareto AMA) ECap simulation
         8. Nedbank 2024 benchmark 6-way ECap allocation with MC override
         9. AFR/ECap coverage ratio + 8-point erosion grid
         10. SA D-SIB benchmark comparison table + 95% CI uncertainty bands
 
-    Outputs are typed ``Dict[str, Any]`` with stable, documented keys consumed
-    directly by the dashboard plotting layer.
+    ``bank_profile`` selects the calibration/benchmark target set from
+    config.params.BANK_BENCHMARK_PROFILES (default: averaged D-SIB profile).
+    If ``total_exposure`` is None, the profile's representative book size is
+    used. Outputs are typed ``Dict[str, Any]`` with stable, documented keys
+    consumed directly by the dashboard plotting layer.
     """
     _validate_run_inputs(
         scenario=scenario,
@@ -193,6 +217,10 @@ def run_engine_end_to_end(
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         engine_version = "dev"
+    profile = BANK_BENCHMARK_PROFILES.get(bank_profile, BANK_BENCHMARK_PROFILES[DEFAULT_BANK_PROFILE])
+    if total_exposure is None:
+        total_exposure = float(profile["total_exposure_bn"]) * 1e9
+    calib_targets = calibration_targets_for_profile(bank_profile)
     snapshot = {
         "scenario": scenario,
         "total_exposure": float(total_exposure),
@@ -212,6 +240,8 @@ def run_engine_end_to_end(
         "allow_synthetic_fallback": bool(allow_synthetic_fallback),
         "portfolio_path": portfolio_path,
         "strict_data_validation": bool(strict_data_validation),
+        "bank_profile": bank_profile,
+        "d_sib_bucket": d_sib_bucket,
     }
     digest = config_digest(snapshot)
     run_id = _next_run_id(digest)
@@ -223,6 +253,8 @@ def run_engine_end_to_end(
         "allow_synthetic_fallback": allow_synthetic_fallback, "portfolio_path": portfolio_path,
         "strict_data_validation": strict_data_validation, "as_of_date": business_date.isoformat(),
         "t_df": t_df,
+        "bank_profile": bank_profile,
+        "d_sib_bucket": d_sib_bucket,
     }
     snapshot_path = None
 
@@ -270,6 +302,43 @@ def run_engine_end_to_end(
     }
     ead_total = float(post_sum(ifrs9_df["ead"].tolist()))
 
+    # 3b. Base-scenario anchoring: the EAD scaling factor and the PD/LGD
+    # calibration scalars are always solved on the unstressed Base run of the
+    # same portfolio, then applied to the requested scenario. Stress therefore
+    # moves outputs relative to the benchmark-anchored base rather than being
+    # calibrated away.
+    base_params = get_scenario_parameters("Base", 1.0, seed)
+    base_macro = scenario_to_macro_conditions(base_params)
+    base_mkt = scenario_to_market_data(base_params)
+    base_ifrs9_df = run_full_ifrs9_pipeline(
+        portfolio, base_macro, base_mkt, forecast_horizon_months=12
+    )
+    base_ifrs9_df = scale_portfolio_to_target(
+        base_ifrs9_df, total_exposure, exposure_col="ead"
+    )
+    ead_scaling_factor = float(base_ifrs9_df.attrs["exposure_scaling_factor"])
+    base_ifrs9_df, ecl_calibration = calibrate_ecl_to_target(
+        base_ifrs9_df, calib_targets["ecl_ead_ratio"]
+    )
+    lgd_calibration = solve_lgd_calibration_factor(
+        base_ifrs9_df, calib_targets["credit_rwa_density"]
+    )
+
+    # 3c. Apply the base-anchored scaling and calibration to the scenario run.
+    ifrs9_df = scale_portfolio_by_factor(ifrs9_df, ead_scaling_factor)
+    ifrs9_df = apply_pd_calibration(
+        ifrs9_df, ecl_calibration["pd_calibration_factor"]
+    )
+
+    ecl_total = float(post_sum(ifrs9_df["ecl"].tolist()))
+    ecl_12m_total = float(post_sum(ifrs9_df["12m_ecl"].tolist()))
+    ecl_lifetime_total = float(post_sum(ifrs9_df["lifetime_ecl"].tolist()))
+    ecl_by_stage = {
+        int(stage): float(post_sum(group["ecl"].tolist()))
+        for stage, group in ifrs9_df.groupby("ifrs9_stage")
+    }
+    ead_total = float(post_sum(ifrs9_df["ead"].tolist()))
+
     # Stage distribution keys are normalised to ints (1, 2, 3)
     stage_dist_raw = ifrs9_df["ifrs9_stage"].value_counts().sort_index().to_dict()
     stage_distribution: Dict[int, int] = {int(k): int(v) for k, v in stage_dist_raw.items()}
@@ -277,13 +346,24 @@ def run_engine_end_to_end(
     avg_pit_pd = float((ifrs9_df["pit_pd_12m"] * ifrs9_df["ead"]).sum() / max(ead_total, 1.0))
     avg_lgd = float((ifrs9_df["lgd"] * ifrs9_df["ead"]).sum() / max(ead_total, 1.0))
 
-    # 4. RWA engine
-    rwa_result = compute_total_rwa(ifrs9_df, macro_cond)
+    # 4. RWA engine (with output floor)
+    rwa_result = compute_total_rwa(
+        ifrs9_df, macro_cond, bank_profile=bank_profile,
+        lgd_calibration_factor=lgd_calibration["lgd_calibration_factor"],
+    )
     total_rwa = float(rwa_result["total_rwa"])
 
-    # 5. RegCap stack and ratios
+    # 5. RegCap stack and ratios. The nominal capital base is anchored to the
+    # unstressed Base-scenario RWA so stressed ratios erode under stress
+    # instead of rescaling with the stressed denominator.
+    base_rwa_result = compute_total_rwa(
+        base_ifrs9_df, base_macro, bank_profile=bank_profile,
+        lgd_calibration_factor=lgd_calibration["lgd_calibration_factor"],
+    )
     regcap_analysis = run_full_regcap_analysis(
-        ifrs9_df, rwa_result, ecl_total, macro_cond, institution_size
+        ifrs9_df, rwa_result, ecl_total, macro_cond, institution_size,
+        bank_profile=bank_profile, d_sib_bucket=d_sib_bucket,
+        resources_rwa=float(base_rwa_result["total_rwa"]),
     )
 
     # 6. Copula MC credit losses
@@ -298,8 +378,10 @@ def run_engine_end_to_end(
     )
 
     # 7. Market + operational ECap
+    # Trading book is a small share of a universal bank's balance sheet
+    # (~5% of EAD), consistent with the ~4% market share of RWA.
     market_mc = compute_market_risk_ecap(
-        ead_total * 1.1,
+        ead_total * 0.05,
         macro_cond,
         n_sims=max(500, n_mc_sims // 2),
         seed=seed + 1,
@@ -342,7 +424,7 @@ def run_engine_end_to_end(
 
     # 10. Benchmarks + uncertainty
     benchmark_vs = _compare_to_bank_benchmarks(
-        regcap_analysis, ifrs9_df, scenario, institution_size
+        regcap_analysis, ifrs9_df, rwa_result, scenario, institution_size
     )
     uncertainty = _compute_uncertainty_bands(
         ifrs9_df, regcap_analysis, ecap_alloc, credit_mc, coverage
@@ -381,6 +463,15 @@ def run_engine_end_to_end(
             "as_of_date": business_date,
             "recorded_at": run_start,
             "snapshot_path": snapshot_path,
+            "bank_profile": bank_profile,
+            "target_total_exposure": float(total_exposure),
+        },
+        "calibration": {
+            "bank_profile": bank_profile,
+            "targets": calib_targets,
+            "ead_scaling_factor": ead_scaling_factor,
+            **ecl_calibration,
+            **lgd_calibration,
         },
         "scenario": {
             "parameters": scenario_params,
@@ -400,12 +491,15 @@ def run_engine_end_to_end(
                 k: float(v) / max(ecl_total, 1.0) for k, v in ecl_by_stage.items()
             },
             "ead_total": ead_total,
+            "ecl_ead_ratio": float(ecl_total / max(ead_total, 1.0)),
             "avg_pit_pd": avg_pit_pd,
             "avg_lgd": avg_lgd,
         },
         "regcap": regcap_analysis,
         "rwa_breakdown": rwa_result["breakdown"],
         "rwa_methodology": rwa_result["methodology"],
+        "rwa_density": float(rwa_result["rwa_density"]),
+        "output_floor": rwa_result["output_floor"],
         "monte_carlo": {
             "credit": credit_mc,
             "market": market_mc,
@@ -429,40 +523,43 @@ def run_engine_end_to_end(
 def _compare_to_bank_benchmarks(
     regcap_analysis: Dict[str, Any],
     ifrs9_df: pd.DataFrame,
+    rwa_result: Dict[str, Any],
     scenario: str,
     institution_size: str,
 ) -> pd.DataFrame:
-    """Return validated DataFrame of bank benchmark comparisons.
+    """Return a DataFrame comparing the engine run to every benchmark profile.
 
-    Stage keys always read as ints 1, 2, 3 -- avoids string/int mix-ups that
-    caused KeyError during benchmark radar construction.
+    The first row is the engine; the remaining rows are the D-SIB average
+    and individual SA bank benchmark profiles from config.params.
     """
     ratios = regcap_analysis["capital_ratios"]
-    ecl_by_stage = ifrs9_df.groupby("ifrs9_stage")["ecl"].sum()
-    ecl_total = float(ifrs9_df["ecl"].sum()) or 1.0
-    s1 = float(ecl_by_stage.get(1, 0.0)) / ecl_total
-    s2 = float(ecl_by_stage.get(2, 0.0)) / ecl_total
-    s3 = float(ecl_by_stage.get(3, 0.0)) / ecl_total
+    ead_total = float(ifrs9_df["ead"].sum())
+    ecl_total = float(ifrs9_df["ecl"].sum())
     car = float(ratios["Total CAR"])
     cet1 = float(ratios["CET1 Ratio"])
+    tier1 = float(ratios["Tier1 Ratio"])
+    leverage = float(ratios["Leverage Ratio"])
+    density = float(rwa_result["rwa_density"])
+    ecl_ead = ecl_total / max(ead_total, 1.0)
 
-    rows: list[Dict[str, str]] = []
-    banks: Dict[str, Any]
-    if institution_size.startswith("Large"):
-        banks = SA_BANK_BENCHMARKS_2024
-    else:
-        banks = {"Nedbank": SA_BANK_BENCHMARKS_2024["Nedbank"]}
-
-    bank_names = list(banks.keys())
-    for idx, (bank, b) in enumerate(banks.items()):
-        is_engine = idx == 0
+    rows: list[Dict[str, str]] = [{
+        "Entity": f"Engine ({scenario})",
+        "RWA Density": f"{density*100:.1f}%",
+        "CET1 Ratio": f"{cet1*100:.2f}%",
+        "Tier 1 Ratio": f"{tier1*100:.2f}%",
+        "Total CAR": f"{car*100:.2f}%",
+        "Leverage Ratio": f"{leverage*100:.2f}%",
+        "ECL / EAD": f"{ecl_ead*100:.2f}%",
+    }]
+    for name, p in BANK_BENCHMARK_PROFILES.items():
         rows.append({
-            "Entity": f"Engine ({scenario})" if is_engine else bank,
-            "Total CAR": f"{car*100:.2f}%" if is_engine else f"{b['CAR']*100:.2f}%",
-            "CET1 Ratio": f"{cet1*100:.2f}%" if is_engine else f"{b['CET1']*100:.2f}%",
-            "Stage 1 ECL %": f"{s1*100:.1f}%" if is_engine else f"{b['ECL_stage1_pct']*100:.0f}%",
-            "Stage 2 ECL %": f"{s2*100:.1f}%" if is_engine else f"{b['ECL_stage2_pct']*100:.0f}%",
-            "Stage 3 ECL %": f"{s3*100:.1f}%" if is_engine else f"{b['ECL_stage3_pct']*100:.0f}%",
+            "Entity": name.replace("_", " "),
+            "RWA Density": f"{p['rwa_density']*100:.1f}%",
+            "CET1 Ratio": f"{p['cet1']*100:.2f}%",
+            "Tier 1 Ratio": f"{p['tier1']*100:.2f}%",
+            "Total CAR": f"{p['total_capital']*100:.2f}%",
+            "Leverage Ratio": f"{p['leverage']*100:.2f}%",
+            "ECL / EAD": f"{p['ecl_ead_target']*100:.2f}%",
         })
 
     return pd.DataFrame(rows)
@@ -600,7 +697,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pipeline_parser = subparsers.add_parser("pipeline", help="Run the end-to-end pipeline once")
     pipeline_parser.add_argument("--scenario", default="Base", choices=["Base", "Adverse", "Severe"])
-    pipeline_parser.add_argument("--total-exposure", type=float, default=500_000_000_000.0)
+    pipeline_parser.add_argument("--total-exposure", type=float, default=None,
+                                 help="Target EAD (defaults to the bank profile's book size)")
+    pipeline_parser.add_argument("--bank-profile", default=DEFAULT_BANK_PROFILE,
+                                 choices=list(BANK_BENCHMARK_PROFILES.keys()))
+    pipeline_parser.add_argument("--d-sib-bucket", type=int, default=None,
+                                 help="D-SIB systemic-importance bucket 0-5 (default from institution size)")
     pipeline_parser.add_argument("--n-accounts", type=int, default=2000)
     pipeline_parser.add_argument("--seed", type=int, default=2024)
     pipeline_parser.add_argument("--institution-size", default="Large_D-SIB")
@@ -634,12 +736,23 @@ def _run_pipeline_command(args: argparse.Namespace) -> int:
         portfolio_path=args.portfolio_path,
         strict_data_validation=args.strict_data_validation,
         as_of_date=args.as_of_date,
+        bank_profile=args.bank_profile,
+        d_sib_bucket=args.d_sib_bucket,
     )
+    ratios = result["regcap"]["capital_ratios"]
     summary = {
         "scenario": args.scenario,
+        "bank_profile": args.bank_profile,
         "total_exposure": result["ifrs9"]["ead_total"],
         "ecl_total": result["ifrs9"]["ecl_total"],
+        "ecl_ead_ratio": result["ifrs9"]["ecl_ead_ratio"],
         "total_rwa": result["regcap"]["total_rwa"],
+        "rwa_density": result["rwa_density"],
+        "cet1_ratio": ratios["CET1 Ratio"],
+        "tier1_ratio": ratios["Tier1 Ratio"],
+        "total_car": ratios["Total CAR"],
+        "leverage_ratio": ratios["Leverage Ratio"],
+        "output_floor_applied": result["output_floor"]["floor_applied"],
         "total_ecap": result["economic_capital"]["total_ecap"],
         "coverage_ratio": result["coverage"]["main"]["Coverage Ratio"],
         "duration_seconds": result["run_metadata"]["duration_seconds"],

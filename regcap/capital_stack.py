@@ -1,4 +1,5 @@
-"""Full RegCap stack: Pillar 1 minima, buffers, capital resources, ratios, MDA triggers."""
+"""Full RegCap stack: Pillar 1 minima, tiered D-SIB buffers, leverage ratio,
+capital resources calibrated to the D-SIB benchmark, ratios, MDA triggers."""
 
 from __future__ import annotations
 
@@ -7,7 +8,37 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
-from config.params import CAPITAL_BUFFERS, PILLAR1_MINIMA
+from config.params import (
+    BANK_BENCHMARK_PROFILES,
+    CAPITAL_BUFFERS,
+    D_SIB_BUFFER_TIERS,
+    DEFAULT_BANK_PROFILE,
+    DEFAULT_D_SIB_BUCKET,
+    LEVERAGE_REQUIREMENTS,
+    PILLAR1_MINIMA,
+)
+
+# Add-on over accounting EAD for derivatives/SFT exposure in the Basel III
+# leverage exposure measure (off-balance sheet CCF exposure is already in EAD).
+LEVERAGE_EXPOSURE_ADDON = 0.02
+
+
+def d_sib_buffer_for_bucket(bucket: int) -> float:
+    """CET1 D-SIB (HLA) add-on for a systemic-importance bucket (0 = not a D-SIB)."""
+    if bucket <= 0:
+        return 0.0
+    return D_SIB_BUFFER_TIERS[min(max(int(bucket), 1), max(D_SIB_BUFFER_TIERS))]
+
+
+def resolve_d_sib_bucket(institution_size: str, bucket: int | None = None) -> int:
+    """Map institution classification to a D-SIB bucket unless one is given."""
+    if bucket is not None:
+        return int(bucket)
+    if institution_size.startswith("Large") or "D-SIB" in institution_size:
+        return DEFAULT_D_SIB_BUCKET
+    if institution_size == "Medium":
+        return 1
+    return 0
 
 
 def compute_full_capital_stack(
@@ -16,10 +47,16 @@ def compute_full_capital_stack(
     ifrs9_ecl_total: float,
     institution_size: str = "Large_D-SIB",
     ccyb_rate: float | None = None,
-    d_sib_score: float = 0.020,
+    d_sib_bucket: int | None = None,
     include_pillar2: bool = True,
 ) -> Dict:
-    """Return full breakdown of percentage + absolute capital requirements."""
+    """Return full breakdown of percentage + absolute capital requirements.
+
+    The D-SIB buffer is a tiered CET1 add-on (SARB Regulation 38 / Basel HLA
+    framework, buckets 1-5 mapping to 0.5%-2.5% of RWA). The leverage ratio
+    requirement is the 4% SARB minimum plus a D-SIB leverage buffer set at
+    50% of the risk-weighted D-SIB buffer.
+    """
     ccyb_rate = CAPITAL_BUFFERS["CCyB"] if ccyb_rate is None else float(ccyb_rate)
 
     cet1_min = PILLAR1_MINIMA["CET1"]
@@ -29,23 +66,18 @@ def compute_full_capital_stack(
     ccb = CAPITAL_BUFFERS["CCB"]
     ccyb = ccyb_rate
 
-    if institution_size.startswith("Large") or "D-SIB" in institution_size:
-        d_sib = float(np.clip(d_sib_score, CAPITAL_BUFFERS["D_SIB_MIN"], CAPITAL_BUFFERS["D_SIB_MAX"]))
-    elif institution_size == "Medium":
-        d_sib = CAPITAL_BUFFERS["D_SIB_MIN"] * 0.5
-    else:
-        d_sib = 0.0
-    hla = CAPITAL_BUFFERS["HLA"] if institution_size in ("Large_D-SIB", "Large") else 0.0
-    pillar2 = 0.015 if include_pillar2 else 0.0
-    combined = ccb + ccyb + d_sib + hla + pillar2
+    bucket = resolve_d_sib_bucket(institution_size, d_sib_bucket)
+    d_sib = d_sib_buffer_for_bucket(bucket)
+    pillar2 = 0.010 if include_pillar2 else 0.0
+    combined = ccb + ccyb + d_sib + pillar2
 
     cet1_req = cet1_min + combined
     t1_req = t1_min + combined
     tot_req = tot_min + combined
 
-    leverage_denom = total_assets * 1.05
-    t1_lv_min = 0.030
-    t1_lv_buf = (0.020 * (d_sib / CAPITAL_BUFFERS["D_SIB_MAX"])) if d_sib > 0 else 0.0
+    leverage_denom = total_assets
+    t1_lv_min = LEVERAGE_REQUIREMENTS["minimum"]
+    t1_lv_buf = LEVERAGE_REQUIREMENTS["d_sib_buffer_scaling"] * d_sib
     lv_req = leverage_denom * (t1_lv_min + t1_lv_buf)
 
     return {
@@ -56,12 +88,16 @@ def compute_full_capital_stack(
             "CCB (Capital Conservation)": ccb,
             "CCyB (Countercyclical 2026)": ccyb,
             "D-SIB Buffer": d_sib,
-            "HLA Buffer": hla,
             "Pillar 2 Add-on": pillar2,
             "Total Combined Buffer": combined,
             "CET1 + Buffers": cet1_req,
             "T1 + Buffers": t1_req,
             "Total + Buffers": tot_req,
+        },
+        "d_sib": {
+            "bucket": bucket,
+            "buffer_rate": d_sib,
+            "tier_schedule": dict(D_SIB_BUFFER_TIERS),
         },
         "absolute_amounts_rwa_based": {
             "CET1 Required": total_rwa * cet1_req,
@@ -69,7 +105,7 @@ def compute_full_capital_stack(
             "Total Capital Required": total_rwa * tot_req,
         },
         "leverage_ratio": {
-            "Denominator (Total Assets adj)": float(leverage_denom),
+            "Denominator (Leverage Exposure)": float(leverage_denom),
             "Minimum Tier1 Leverage": t1_lv_min,
             "D-SIB Leverage Buffer": t1_lv_buf,
             "Tier1 Leverage + Buffer": t1_lv_min + t1_lv_buf,
@@ -82,20 +118,25 @@ def compute_full_capital_stack(
 def generate_default_capital_resources(
     total_rwa: float,
     ifrs9_ecl_total: float,
-    car_target: float = 0.175,
-    cet1_ratio_target: float = 0.130,
+    bank_profile: str = DEFAULT_BANK_PROFILE,
 ) -> Dict:
-    """Build a realistic capital resources breakdown consistent with SA large-bank Pillar 3 disclosures."""
-    tot_cap = total_rwa * car_target
+    """Build a capital resources breakdown calibrated to the selected bank
+    benchmark profile (D-SIB average: CET1 11.6%, Tier 1 13.6%, Total 15.5%)."""
+    profile = BANK_BENCHMARK_PROFILES.get(bank_profile, BANK_BENCHMARK_PROFILES[DEFAULT_BANK_PROFILE])
+    cet1_ratio_target = float(profile["cet1"])
+    t1_ratio_target = float(profile["tier1"])
+    car_target = float(profile["total_capital"])
+
     cet1 = total_rwa * cet1_ratio_target
-    at1 = max(total_rwa * 0.015, 0.0)
-    t2_cap = max(tot_cap - cet1 - at1, total_rwa * 0.020)
-    at1 = max(tot_cap - cet1 - t2_cap, 0.0)
+    at1 = total_rwa * max(t1_ratio_target - cet1_ratio_target, 0.0)
+    t2_cap = total_rwa * max(car_target - t1_ratio_target, 0.0)
+    tot_cap = cet1 + at1 + t2_cap
 
     gross_cet1 = cet1 / (1.0 - 0.08)
     ded = gross_cet1 - cet1
 
     return {
+        "benchmark_profile": bank_profile,
         "CET1": {
             "Gross CET1 before deductions": float(gross_cet1),
             "Retained Earnings": float(gross_cet1 * 0.65),
@@ -118,7 +159,7 @@ def generate_default_capital_resources(
             "Other T2": float(t2_cap * 0.25),
             "Net T2 Available": float(t2_cap),
         },
-        "Total Capital Available": float(cet1 + at1 + t2_cap),
+        "Total Capital Available": float(tot_cap),
         "CET1 Available": float(cet1),
         "Tier1 Available (CET1+AT1)": float(cet1 + at1),
         "T2 Available": float(t2_cap),
@@ -141,7 +182,9 @@ def compute_capital_ratios_and_erosion(
     cet1_ratio = cet1 / max(total_rwa, 1.0)
     t1_ratio = t1 / max(total_rwa, 1.0)
     car = tot_cap / max(total_rwa, 1.0)
-    lv_ratio = t1 / max(capital_stack["leverage_ratio"]["Denominator (Total Assets adj)"], 1.0)
+    lv_denom = capital_stack["leverage_ratio"]["Denominator (Leverage Exposure)"]
+    lv_ratio = t1 / max(lv_denom, 1.0)
+    lv_req_ratio = capital_stack["leverage_ratio"]["Tier1 Leverage + Buffer"]
 
     buf_req = total_rwa * pct["Total Combined Buffer"]
     cet1_above = cet1 - total_rwa * pct["CET1 Min (Pillar 1)"]
@@ -168,6 +211,8 @@ def compute_capital_ratios_and_erosion(
         "Tier1 Ratio": float(t1_ratio),
         "Total CAR": float(car),
         "Leverage Ratio": float(lv_ratio),
+        "Leverage Requirement": float(lv_req_ratio),
+        "Leverage Surplus": float(lv_ratio - lv_req_ratio),
         "CET1 Surplus (vs CET1+Buffers)": float(cet1 - abs_req["CET1 Required"]),
         "T1 Surplus (vs T1+Buffers)": float(t1 - abs_req["Tier1 Required"]),
         "Total Capital Surplus (vs Total+Buffers)": float(tot_cap - abs_req["Total Capital Required"]),
@@ -184,12 +229,26 @@ def run_full_regcap_analysis(
     ifrs9_ecl_total: float,
     macro_conditions: Dict | None = None,
     institution_size: str = "Large_D-SIB",
+    bank_profile: str = DEFAULT_BANK_PROFILE,
+    d_sib_bucket: int | None = None,
+    resources_rwa: float | None = None,
 ) -> Dict:
-    """Complete RegCap analysis: stack, resources, ratios."""
+    """Complete RegCap analysis: stack, resources, ratios.
+
+    ``resources_rwa`` anchors the nominal capital base (default: this run's
+    RWA). Passing the unstressed Base-scenario RWA keeps capital resources
+    fixed under stress so stressed ratios erode rather than rescale.
+    """
     total_rwa = float(rwa_result["total_rwa"])
-    total_assets = float(portfolio_df["ead"].sum() * 1.1)
-    stack = compute_full_capital_stack(total_rwa, total_assets, ifrs9_ecl_total, institution_size)
-    resources = generate_default_capital_resources(total_rwa, ifrs9_ecl_total)
+    total_assets = float(portfolio_df["ead"].sum() * (1.0 + LEVERAGE_EXPOSURE_ADDON))
+    stack = compute_full_capital_stack(
+        total_rwa, total_assets, ifrs9_ecl_total, institution_size,
+        d_sib_bucket=d_sib_bucket,
+    )
+    resources = generate_default_capital_resources(
+        float(resources_rwa) if resources_rwa is not None else total_rwa,
+        ifrs9_ecl_total, bank_profile=bank_profile,
+    )
     ratios = compute_capital_ratios_and_erosion(resources, stack, total_rwa, total_assets)
     return {
         "capital_stack": stack,
@@ -197,4 +256,5 @@ def run_full_regcap_analysis(
         "capital_ratios": ratios,
         "total_rwa": total_rwa,
         "total_assets": total_assets,
+        "bank_profile": bank_profile,
     }
