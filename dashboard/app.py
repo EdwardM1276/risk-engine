@@ -141,7 +141,7 @@ def main():
             background: linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
         }
         .block-container {
-            padding-top: 0.8rem !important;
+            padding-top: 1.8rem !important;
             padding-bottom: 2rem !important;
             max-width: 1500px !important;
         }
@@ -229,6 +229,19 @@ def main():
         [data-testid="stSidebar"] [data-testid="stNumberInput"] input {
             color: #f8fafc !important;
             background-color: #1e293b !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button {
+            color: #0f172a !important;
+            background-color: #e2e8f0 !important;
+            border: 1px solid #94a3b8 !important;
+            opacity: 1 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button svg,
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button svg path {
+            color: #0f172a !important;
+            fill: #0f172a !important;
+            stroke: #0f172a !important;
+            opacity: 1 !important;
         }
         [data-testid="stSidebar"] [data-testid="stSlider"] [role="slider"] {
             background-color: #bfdbfe !important;
@@ -430,7 +443,13 @@ def main():
         st.subheader("IFRS 9 Stage Distribution & ECL Allocation")
         try:
             stage_df = plot_stage_distribution(ifrs9)
+            st.markdown("**Accounts by stage**")
             st.bar_chart(stage_df.set_index("Stage")["Accounts"])
+            st.markdown("**Expected credit loss by stage (R billions)**")
+            st.caption(
+                "This shows where the estimated rand losses sit. A stage with fewer accounts can still "
+                "contribute more ECL if its balances are larger or riskier."
+            )
             st.bar_chart(stage_df.set_index("Stage")["ECL_bn"])
         except Exception:
             st.warning("Stage graphics were not available; the summary metrics remain visible.")
