@@ -7,10 +7,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from run import run_engine_end_to_end
-from data.acquisition import fetch_uci_credit_card_defaults, summarize_uci_default_benchmark
 from config.params import (
     SARB_DIRECTIVES, NEDBANK_ECAP_BENCHMARK_2024, PORTFOLIO_SEGMENTS,
     BANK_BENCHMARK_PROFILES, DEFAULT_BANK_PROFILE, D_SIB_BUFFER_TIERS,
+    SA_BANK_BENCHMARK_SOURCES_2024,
 )
 
 st.set_page_config(
@@ -46,12 +46,6 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_public_credit_benchmark():
-    """Cache the observed UCI benchmark for the current dashboard session."""
-    return summarize_uci_default_benchmark(fetch_uci_credit_card_defaults())
 
 
 def plot_stage_distribution(ifrs9):
@@ -125,27 +119,6 @@ def plot_coverage_erosion(coverage):
         if col not in df.columns:
             df[col] = 0.0
     return df[["Shock Intensity (x)", "Coverage Ratio", "ECap Expansion %", "AFR Erosion %"]]
-
-
-def plot_uncertainty_bands(uncertainty):
-    rows = []
-    for metric, band in uncertainty.items():
-        if "CAR" in metric or "Coverage" in metric:
-            continue
-        rows.append({
-            "Metric": metric,
-            "Central (R bn)": _safe_float(band.get("central", 0.0)) / 1e9,
-            "Lower 95% (R bn)": _safe_float(band.get("lower_95", 0.0)) / 1e9,
-            "Upper 95% (R bn)": _safe_float(band.get("upper_95", 0.0)) / 1e9,
-            "Model Risk (R bn)": _safe_float(band.get("model_risk", 0.0)) / 1e9,
-        })
-    return pd.DataFrame(rows)
-
-
-def plot_benchmark_radar(bench_df, regcap_result):
-    if bench_df is None or bench_df.empty:
-        return pd.DataFrame({"Metric": ["Total CAR", "CET1 Ratio"], "Value": [0.0, 0.0]})
-    return bench_df.copy()
 
 
 def main():
@@ -228,13 +201,38 @@ def main():
             background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
             border-right: 1px solid rgba(148,163,184,0.18);
         }
-        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] h4,
+        [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] button,
+        [data-testid="stSidebar"] [data-testid="stSlider"] div,
+        [data-testid="stSidebar"] [data-testid="stSlider"] span,
+        [data-testid="stSidebar"] [data-testid^="stSliderTickBar"],
+        [data-testid="stSidebar"] [data-testid="stThumbValue"],
+        [data-testid="stSidebar"] .stMarkdown,
         [data-testid="stSidebar"] .stCheckbox label,
         [data-testid="stSidebar"] .stCheckbox label p,
         [data-testid="stSidebar"] .stCheckbox label span,
         [data-testid="stSidebar"] .block-container {
-            color: #ffffff !important;
+            color: #f8fafc !important;
+            opacity: 1 !important;
+        }
+        [data-testid="stSidebar"] [data-baseweb="select"] *,
+        [data-testid="stSidebar"] [data-baseweb="select"] [aria-selected="true"] {
+            color: #0f172a !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] input {
+            color: #f8fafc !important;
+            background-color: #1e293b !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stSlider"] [role="slider"] {
+            background-color: #bfdbfe !important;
+            border-color: #ffffff !important;
         }
         [data-testid="stSidebar"] .stSelectbox > div,
         [data-testid="stSidebar"] .stNumberInput > div,
@@ -251,32 +249,22 @@ def main():
         .stAlert {
             border-radius: 0.8rem;
         }
-        .presentation-header {
-            background: linear-gradient(135deg, rgba(29,78,216,0.12), rgba(59,130,246,0.04));
-            border: 1px solid rgba(29,78,216,0.1);
-            border-radius: 0.9rem;
-            padding: 0.8rem 1rem;
-            margin-bottom: 0.8rem;
-        }
         </style>
         """, unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div class="presentation-header">
-            <div style="font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: #2563eb; font-weight: 700; margin-bottom: 0.2rem;">Executive risk dashboard</div>
-            <div style="font-size: 2.1rem; font-weight: 700; color: #10233b; line-height: 1.1;">South African Credit Risk Volatility Engine</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.caption("IFRS 9 ECL, Basel III RegCap, and Economic Capital aligned with SARB Directives 5/2017, 6/2024, and Regulation 38/43")
-
     with st.sidebar:
         st.header("Engine Controls")
-        data_source = st.selectbox("Data Source", ["synthetic", "public"], index=1,
-                       help="Public mode uses live World Bank, SARB, FRED, and FDIC data")
+        data_source = st.selectbox(
+            "Data mode",
+            ["synthetic", "public"],
+            index=0,
+            format_func=lambda mode: {
+                "synthetic": "Synthetic demonstration",
+                "public": "Public context + synthetic accounts",
+            }[mode],
+            help="Public mode includes aggregate public context and generated synthetic accounts; it is not observed South African borrower data.",
+        )
         scenario = st.selectbox("Scenario (SARB/IMF Standard)", ["Base", "Adverse", "Severe"], index=0)
         severity = st.slider("Severity Multiplier", 0.5, 2.5, 1.0, 0.1,
                               help="Interpolate between standard scenario bounds")
@@ -310,6 +298,8 @@ def main():
         with st.expander("Regulatory References"):
             for k, v in SARB_DIRECTIVES.items():
                 st.markdown(f"- **{k}**: {v}")
+
+    st.title("South African Credit Risk Volatility Engine")
 
     idio_shocks = {
         "sovereign_downgrade": sov_shock,
@@ -349,6 +339,15 @@ def main():
 
     st.success(f"Engine completed in {result['run_metadata']['duration_seconds']:.2f}s - Scenario: **{run_label}**")
     quality = result["raw_data"]["data_quality"]
+    if data_source == "synthetic":
+        st.info(
+            "Research prototype using a synthetic demonstration portfolio. "
+            "Outputs are exploratory and are not empirical bank estimates or regulatory calculations."
+        )
+    elif data_source == "public":
+        st.info(
+            "Public context + synthetic accounts. Public aggregates are not South African borrower-level observations."
+        )
     if quality.get("status") != "PASSED":
         st.warning(
             f"Data quality status: {quality.get('status', 'REVIEW')}. "
@@ -390,10 +389,10 @@ def main():
 
     st.divider()
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "Shock Propagation", "IFRS 9 & Staging", "RegCap & RWA",
+    tab8, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "Learn the Model", "Shock Propagation", "IFRS 9 & Staging", "RegCap & RWA",
         "Economic Capital & MC", "Coverage & Erosion",
-        "Benchmarks vs SA Banks", "Uncertainty & Model Risk"
+        "Benchmarks vs SA Banks", "Model Uncertainty"
     ])
 
     with tab1:
@@ -512,7 +511,10 @@ def main():
                        delta_color="inverse" if output_floor["floor_applied"] else "normal")
 
         st.subheader("Output Floor Mechanics")
-        st.caption("Final RWA = max(modelled IRB RWA, floor % x standardised RWA) - Basel III output floor")
+        st.caption(
+            "Sensitivity proxy: final RWA = max(modelled IRB proxy, floor % x incomplete standardised RWA proxy). "
+            "This is not official regulatory RWA or a compliance calculation."
+        )
         floor_df = pd.DataFrame([
             {"Measure": "Modelled (IRB) RWA", "R bn": output_floor["modelled_rwa"] / 1e9},
             {"Measure": "Standardised RWA", "R bn": output_floor["standardised_rwa"] / 1e9},
@@ -549,17 +551,15 @@ def main():
             credit_tail = result["monte_carlo"]["credit"]
             if credit_tail.get("tail_estimate_warning", False):
                 st.warning(
-                    "The 99.9% credit tail contains fewer than 100 simulated "
-                    "observations; treat ECap as directional, not a stable estimate."
+                    "Credit ECap is exploratory: the 99.9% tail has inadequate observations "
+                    "or independent replications. No formal confidence interval is available."
                 )
             convergence = credit_tail.get("convergence", {})
-            if convergence and not convergence.get("converged", False):
+            if convergence:
                 st.warning(
-                    "The 99.9% tail has not converged at the configured tolerance. "
-                    "Treat the estimate as directional, not decision-grade."
+                    "Checkpoint stability reuses nested samples from one seed and does not validate "
+                    "99.9% tail accuracy. Treat ECap as exploratory, not decision-grade."
                 )
-            elif convergence:
-                st.success("The cumulative tail estimate passed the configured convergence tolerance.")
         except Exception:
             st.warning("Loss distribution could not be rendered; key summary metrics remain visible.")
 
@@ -579,6 +579,11 @@ def main():
     with tab5:
         st.subheader("AFR vs ECap Coverage")
         cov_main = result["coverage"]["main"]
+        st.warning(
+            "AFR is illustrative: it is benchmark-constructed regulatory capital resources plus a 30% ECL proxy. "
+            "It is not actual bank AFR or a solvency assessment."
+        )
+        st.caption(cov_main.get("AFR basis", "Illustrative proxy resources"))
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("Coverage Ratio", f"{cov_main['Coverage Ratio']*100:.1f}%",
@@ -615,33 +620,74 @@ def main():
             st.dataframe(bench_df, use_container_width=True, hide_index=True)
         except Exception:
             st.warning("Benchmark table could not be rendered.")
-        try:
-            radar_df = plot_benchmark_radar(bench_df, regcap)
-            st.bar_chart(radar_df.set_index("Metric") if "Metric" in radar_df.columns else radar_df)
-        except Exception:
-            st.warning("Benchmark summary chart was simplified due to plotting incompatibility.")
+        st.caption(
+            "Static 2024 reference inputs, not a live bank assessment. ECL/EAD is a shared "
+            "1.5% prototype target; published bank figures can differ by reporting scope and definition."
+        )
 
-        st.subheader("Observed Public Credit Benchmark")
-        try:
-            observed_benchmark = load_public_credit_benchmark()
-            st.metric("UCI Observed Default Rate", f"{observed_benchmark['overall_default_rate'] * 100:.2f}%")
-            st.dataframe(pd.DataFrame(observed_benchmark["default_rate_by_dpd"]), use_container_width=True, hide_index=True)
-            st.caption("UCI Taiwan credit-card observations are a PD challenger benchmark, not bank-specific IFRS 9 data.")
-        except Exception as exc:
-            st.warning(f"Observed public benchmark unavailable: {exc}")
+        with st.expander("Sources and how to read this table"):
+            st.markdown("Primary public disclosures referenced for the bank rows (reviewed 25 October 2026):")
+            for source in SA_BANK_BENCHMARK_SOURCES_2024.values():
+                st.markdown(
+                    f"- [{source['title']}]({source['url']}) — {source['scope']}"
+                )
+            st.warning(
+                "The benchmark values are stored in configuration and are not fetched from these reports. "
+                "The earlier inputs did not preserve a page-and-table citation for every cell, so these "
+                "documents are references for review, not proof that every current value has been "
+                "reconciled line by line. ECL/EAD is a 1.5% engine calibration target, not a bank-reported "
+                "figure; the D-SIB average is a prototype profile. Reporting scope, date and denominators "
+                "also differ. Treat the rows as indicative until those fields are reconciled."
+            )
 
     with tab7:
-        st.subheader("Model Uncertainty")
-        try:
-            u_df = plot_uncertainty_bands(result["uncertainty_bands"])
-            st.bar_chart(u_df.set_index("Metric"))
-            st.dataframe(u_df, use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Uncertainty chart could not be rendered, but the model risk summary remains available.")
+        st.subheader("How much should I trust these estimates?")
+        st.write(
+            "Think of these results as estimates from a model, not promises about what will happen. "
+            "The ranges below show selected what-if changes to assumptions. They are not odds or "
+            "statistical confidence ranges."
+        )
+        st.info(
+            "**What does 99.9% mean?** It is a cut-off in the model's simulated loss results: "
+            "under the model's assumptions, about 1 in 1,000 outcomes would be higher than this level. "
+            "It does not mean the model is 99.9% accurate, or that a loss will happen exactly once every 1,000 years."
+        )
+        uncertainty = result["uncertainty_bands"]
+        ecl_band = uncertainty["ECL"]
+        ecap_band = uncertainty["Total ECap"]
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Estimated credit losses (ECL)", FORMAT_ZAR(ecl_band["central"]))
+            st.caption(
+                f"Illustrative what-if range: {FORMAT_ZAR(ecl_band['illustrative_lower'])} to "
+                f"{FORMAT_ZAR(ecl_band['illustrative_upper'])}. This range comes from fixed assumptions."
+            )
+        with c2:
+            st.metric("Estimated total risk cushion (ECap)", FORMAT_ZAR(ecap_band["central"]))
+            st.caption(
+                f"Illustrative what-if range: {FORMAT_ZAR(ecap_band['illustrative_lower'])} to "
+                f"{FORMAT_ZAR(ecap_band['illustrative_upper'])}. Some parts use benchmark assumptions."
+            )
 
-        st.subheader("Model Risk Allocation")
-        model_risk = NEDBANK_ECAP_BENCHMARK_2024["model_risk_pct"] * ecap["total_ecap"]
-        st.info(f"**Model Risk Reserve:** R{model_risk/1e6:,.1f}m ({NEDBANK_ECAP_BENCHMARK_2024['model_risk_pct']*100:.1f}% of total ECap) - explicitly allocated per SA best practice.")
+        credit_tail = result["monte_carlo"]["credit"]
+        expected_tail = credit_tail.get("expected_tail_observations_999", 0.0)
+        observed_tail = credit_tail.get("tail_observations_999", 0)
+        simulation_count = credit_tail.get("n_sims", n_mc_sims)
+        st.subheader("A special caution about the very worst losses")
+        st.warning(
+            f"This run tried {simulation_count:,} possible outcomes. At the 99.9% level, "
+            f"that gives about {expected_tail:.1f} expected tail observations; the calculation "
+            f"uses {observed_tail}. That is too little evidence for a dependable extreme-loss estimate. "
+            "Treat credit ECap as exploratory."
+        )
+
+        with st.expander("What can make these results uncertain?"):
+            st.markdown(
+                "- **Input uncertainty:** the default view uses a synthetic portfolio.\n"
+                "- **Assumption uncertainty:** some RWA, ECap and capital-resource values are proxies.\n"
+                "- **Simulation uncertainty:** random trials may miss rare, very large losses.\n\n"
+                "The 99.9% level does not mean the model is 99.9% accurate."
+            )
 
         with st.expander("Audit Trail: Assumptions & Parameterisation"):
             st.json({
@@ -664,6 +710,89 @@ def main():
                     for k, v in result["calibration"].items() if k != "targets"
                 },
             })
+
+    with tab8:
+        st.subheader("Learn the model in a few minutes")
+        st.write(
+            "Follow one simple question at a time. Choose a short lesson, see a small example "
+            "from this run, then try one check question. You can skip the technical details."
+        )
+        lesson_names = [
+            "Start here: what the engine does",
+            "Credit losses and IFRS 9 stages",
+            "Risk-weighted assets and capital",
+            "Economic capital and coverage",
+            "Scenarios and uncertainty",
+        ]
+        lesson = st.selectbox("Choose a one-minute lesson", lesson_names, key="learning_topic")
+
+        lessons = {
+            lesson_names[0]: {
+                "plain": "The engine asks: if the economy changes, how might a made-up loan portfolio's losses and capital needs change? It follows a chain from borrower risk to estimated losses, then to capital measures.",
+                "example": f"For this {scenario.lower()} run, the model estimates {FORMAT_ZAR(ifrs9['ecl_total'])} in credit losses on about {FORMAT_ZAR(ifrs9['ead_total'])} of exposure.",
+                "where": "Start with the headline figures, then open Shock Propagation to see which scenario changes were applied.",
+                "question": "Are the synthetic portfolio results observations from a real South African bank?",
+                "choices": ["Yes, they are bank records", "No, they are generated examples"],
+                "answer": "No, they are generated examples",
+                "feedback": "Synthetic means generated for demonstration; it is not observed bank data.",
+            },
+            lesson_names[1]: {
+                "plain": "Expected Credit Loss (ECL) is the model's estimate of money lenders may not get back. A simple picture is: amount at risk × chance of default × share lost if default happens. IFRS 9 stages decide whether the engine uses a 12-month or lifetime loss estimate. This prototype uses a simplified formula; it does not include every IFRS 9 cash-flow or discounting rule.",
+                "example": f"A simple R100 loan with a 2% chance of default and a 40% loss if defaulted gives R0.80 expected loss (R100 × 2% × 40%). This run's total ECL is {FORMAT_ZAR(ifrs9['ecl_total'])}.",
+                "where": "Open IFRS 9 & Staging. Stage 1 uses 12-month default risk; Stages 2 and 3 use lifetime risk in this prototype.",
+                "question": "If the chance of default stays the same, what happens to estimated loss when the amount exposed gets larger?",
+                "choices": ["It usually gets larger", "It must become zero"],
+                "answer": "It usually gets larger",
+                "feedback": "More money exposed can mean more loss if the other assumptions stay the same.",
+            },
+            lesson_names[2]: {
+                "plain": "Risk-weighted assets (RWA) are a way to scale a bank's exposures by their risk. A capital ratio compares a capital cushion with those risk-scaled exposures. A larger ratio generally means more capital for each unit of measured risk.",
+                "example": f"This run has about {FORMAT_ZAR(regcap['total_rwa'])} of RWA and a CET1 ratio of {FORMAT_PCT(ratios['CET1 Ratio'])}. CET1 is the highest-quality capital measure shown here.",
+                "where": "Open RegCap & RWA. The RWA and floor calculations here are labelled proxies, not official regulatory returns.",
+                "question": "What is RWA trying to reflect?",
+                "choices": ["Exposure size adjusted for measured risk", "The bank's yearly profit"],
+                "answer": "Exposure size adjusted for measured risk",
+                "feedback": "RWA adjusts exposures for risk; it is not a profit measure.",
+            },
+            lesson_names[3]: {
+                "plain": "ECL is the model's estimate of expected loss. Economic capital (ECap) is intended to represent a larger cushion for unusually bad losses. Coverage compares available resources with that cushion.",
+                "example": f"This run's ECap indicator is {FORMAT_ZAR(ecap['total_ecap'])}; its displayed coverage is {coverage['Coverage Ratio']:.2f} times. Both rely on prototype assumptions, including an AFR proxy.",
+                "where": "Open Economic Capital & MC and Coverage & Erosion. The 99.9% credit tail warning means there are too few simulated rare losses to rely on that estimate.",
+                "question": "Does the displayed coverage use an actual bank's reconciled capital records?",
+                "choices": ["Yes", "No, it uses an illustrative proxy"],
+                "answer": "No, it uses an illustrative proxy",
+                "feedback": "It is useful for learning the calculation, not judging a real bank's solvency.",
+            },
+            lesson_names[4]: {
+                "plain": "A scenario is a 'what if' story about the economy, such as a downturn. It helps compare outcomes if assumptions change; it is not a forecast that the story will happen. Uncertainty means the result can change when data, assumptions or random trials change.",
+                "example": f"Your current choice is {scenario}. The estimate is {FORMAT_ZAR(ifrs9['ecl_total'])} ECL, but the uncertainty ranges are illustrative what-if ranges—not probabilities.",
+                "where": "Compare Base, Adverse and Severe from the sidebar. Then read Uncertainty, Simply for the main cautions in plain language.",
+                "question": "Does choosing Severe mean the model says a severe downturn is likely?",
+                "choices": ["Yes, it is a probability forecast", "No, it is a stress-test scenario"],
+                "answer": "No, it is a stress-test scenario",
+                "feedback": "The scenario explores a possible stress; it does not assign a likelihood.",
+            },
+        }
+        selected_lesson = lessons[lesson]
+        st.markdown("#### In plain language")
+        st.write(selected_lesson["plain"])
+        st.markdown("#### A quick example from this run")
+        st.info(selected_lesson["example"])
+        st.markdown("#### Where to look next")
+        st.write(selected_lesson["where"])
+        st.markdown("#### Check your understanding")
+        selected_answer = st.radio(
+            selected_lesson["question"], selected_lesson["choices"],
+            key=f"learning_answer_{lesson}",
+        )
+        if st.button("Check answer", key=f"learning_check_{lesson}"):
+            if selected_answer == selected_lesson["answer"]:
+                st.success(f"That's right. {selected_lesson['feedback']}")
+            else:
+                st.info(
+                    f"Not quite. The answer is **{selected_lesson['answer']}**. "
+                    f"{selected_lesson['feedback']}"
+                )
 
 
 if __name__ == "__main__":

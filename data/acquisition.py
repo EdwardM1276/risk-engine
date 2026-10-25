@@ -419,6 +419,7 @@ def fetch_sarb_current_rates(
 def fetch_world_bank_macro_data(
     country: str = "ZAF",
     periods: int = 36,
+    as_of_date=None,
 ) -> pd.DataFrame:
     """Fetch observed annual macro indicators from the World Bank API.
 
@@ -448,9 +449,11 @@ def fetch_world_bank_macro_data(
         series[name] = pd.Series(values).sort_index()
 
     annual = pd.concat(series, axis=1).dropna().sort_index()
+    effective_date = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else pd.Timestamp.today().normalize()
+    annual = annual.loc[annual.index <= effective_date]
     if annual.empty:
-        raise RuntimeError(f"World Bank returned no complete macro observations for {country}")
-    monthly_index = pd.date_range(end=annual.index.max(), periods=periods, freq="ME").normalize()
+        raise RuntimeError(f"World Bank returned no complete macro observations for {country} by {effective_date.date()}")
+    monthly_index = pd.date_range(end=effective_date, periods=periods, freq="ME").normalize()
     monthly = annual.reindex(annual.index.union(monthly_index)).sort_index().interpolate("time")
     monthly = monthly.reindex(monthly_index).ffill().bfill().reset_index()
     monthly = monthly.rename(columns={"index": "date"})
@@ -467,6 +470,7 @@ def fetch_fdic_bank_financials(
     state: Optional[str] = None,
     banks: int = 25,
     periods: int = 12,
+    as_of_date=None,
 ) -> pd.DataFrame:
     """Fetch observed quarterly bank financials from the FDIC BankFind API.
 
@@ -505,6 +509,9 @@ def fetch_fdic_bank_financials(
             "net_income_usd": float(record.get("NETINC") or 0.0) * 1000.0,
         })
     result = pd.DataFrame(rows)
+    if as_of_date is not None and not result.empty:
+        cutoff = pd.Timestamp(as_of_date).normalize()
+        result = result.loc[result["date"] <= cutoff]
     if result.empty:
         raise RuntimeError("FDIC returned no bank financial observations with loan balances")
     result = result.sort_values("date", ascending=False)
@@ -587,10 +594,20 @@ def normalize_fdic_portfolio(
     return pd.DataFrame(rows)
 
 
-def fetch_sarb_macro_data(periods: int = 36, seed: int = 42) -> pd.DataFrame:
+def _synthetic_month_ends(periods: int, as_of_date=None) -> pd.DatetimeIndex:
+    """Return common, normalized month-ends with no future date leakage."""
+    if periods < 1:
+        raise ValueError("periods must be at least 1")
+    end = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else pd.Timestamp.today().normalize()
+    return pd.date_range(end=end, periods=periods, freq="ME").normalize()
+
+
+def fetch_sarb_macro_data(
+    periods: int = 36, seed: int = 42, as_of_date=None
+) -> pd.DataFrame:
     """Generate SARB-style macro timeseries (MMRD000A prime, CPI1000F CPI, etc)."""
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end=datetime.now(), periods=periods, freq="ME")
+    dates = _synthetic_month_ends(periods, as_of_date)
     repo = np.clip(0.0775 + rng.normal(0, 0.003, periods).cumsum(), 0.035, 0.12)
     prime = repo + 0.035
     cpi_yoy = np.clip(0.050 + rng.normal(0, 0.002, periods).cumsum(), 0.02, 0.14)
@@ -605,10 +622,12 @@ def fetch_sarb_macro_data(periods: int = 36, seed: int = 42) -> pd.DataFrame:
     return df
 
 
-def fetch_eskom_loadshedding(periods: int = 36, seed: int = 42) -> pd.DataFrame:
+def fetch_eskom_loadshedding(
+    periods: int = 36, seed: int = 42, as_of_date=None
+) -> pd.DataFrame:
     """EskomSePush-style loadshedding stages with winter (May-Aug) spike."""
     rng = np.random.default_rng(seed + 1)
-    dates = pd.date_range(end=datetime.now(), periods=periods, freq="ME")
+    dates = _synthetic_month_ends(periods, as_of_date)
     base_stage = rng.integers(1, 5, periods)
     winter_bonus = np.where(dates.month.isin([5, 6, 7, 8]), rng.integers(1, 3, periods), 0)
     stage = np.clip(base_stage + winter_bonus, 0, 8)
@@ -620,10 +639,12 @@ def fetch_eskom_loadshedding(periods: int = 36, seed: int = 42) -> pd.DataFrame:
     })
 
 
-def fetch_jse_market_data(periods: int = 36, seed: int = 42) -> pd.DataFrame:
+def fetch_jse_market_data(
+    periods: int = 36, seed: int = 42, as_of_date=None
+) -> pd.DataFrame:
     """JSE indices + sovereign CDS + rand-denominated commodity prices."""
     rng = np.random.default_rng(seed + 2)
-    dates = pd.date_range(end=datetime.now(), periods=periods, freq="ME")
+    dates = _synthetic_month_ends(periods, as_of_date)
     jse_alsi = 75000 * np.exp(rng.normal(0.006, 0.04, periods).cumsum())
     jse_property = 2500 * np.exp(rng.normal(0.001, 0.05, periods).cumsum())
     sovereign_cds_bps = np.clip(250 + rng.normal(0, 20, periods).cumsum(), 80, 700)
@@ -818,13 +839,16 @@ def acquire_all_data(
     source_notes: Dict[str, str]
     if data_source in {"public", "institutional"}:
         try:
-            macro = fetch_world_bank_macro_data(periods=periods)
+            macro = fetch_world_bank_macro_data(periods=periods, as_of_date=as_of_date)
             current_rates = fetch_sarb_current_rates(active_config)
             if portfolio_path:
                 portfolio = load_institutional_portfolio(portfolio_path)
                 portfolio_source = f"Institutional extract: {portfolio_path}"
             else:
-                financials = fetch_fdic_bank_financials(banks=max(1, min(n_accounts, 25)), periods=periods)
+                financials = fetch_fdic_bank_financials(
+                    banks=max(1, min(n_accounts, 25)), periods=periods,
+                    as_of_date=as_of_date,
+                )
                 portfolio = normalize_fdic_portfolio(financials, institution_size)
                 portfolio_source = "FDIC BankFind quarterly aggregate bank financials; not account-level data"
             mkts = fetch_fred_exchange_rate(periods, end_date=macro["date"].max())
@@ -840,16 +864,16 @@ def acquire_all_data(
         except RuntimeError:
             if not allow_synthetic_fallback:
                 raise
-            macro = fetch_sarb_macro_data(periods, seed)
-            ls = fetch_eskom_loadshedding(periods, seed)
-            mkts = fetch_jse_market_data(periods, seed)
+            macro = fetch_sarb_macro_data(periods, seed, as_of_date)
+            ls = fetch_eskom_loadshedding(periods, seed, as_of_date)
+            mkts = fetch_jse_market_data(periods, seed, as_of_date)
             portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size, as_of_date)
             merged_ts = macro.merge(ls, on="date", how="inner").merge(mkts, on="date", how="inner")
             source_notes = {"all": "Synthetic fallback used after public acquisition failure"}
     else:
-        macro = fetch_sarb_macro_data(periods, seed)
-        ls = fetch_eskom_loadshedding(periods, seed)
-        mkts = fetch_jse_market_data(periods, seed)
+        macro = fetch_sarb_macro_data(periods, seed, as_of_date)
+        ls = fetch_eskom_loadshedding(periods, seed, as_of_date)
+        mkts = fetch_jse_market_data(periods, seed, as_of_date)
         portfolio = generate_sa_loan_portfolio(total_exposure, n_accounts, seed, institution_size, as_of_date)
         merged_ts = macro.merge(ls, on="date", how="inner").merge(mkts, on="date", how="inner")
         source_notes = {"all": "Synthetic research generator"}
@@ -863,6 +887,8 @@ def acquire_all_data(
     for column in mkts.columns:
         if column != "date" and mkts[column].isna().all():
             quality_flags.append(f"No market observations in {column}")
+    if merged_ts.empty:
+        quality_flags.append("No common macro, market, and load-shedding dates in the merged time series")
     if portfolio["loan_to_value"].isna().any():
         quality_flags.append("NaN LTV rows present")
 
@@ -905,6 +931,6 @@ def acquire_all_data(
             "data_source": data_source,
             "source_notes": source_notes,
             "synthetic_fallback_used": bool(data_source == "public" and source_notes.get("all")),
-            "status": "PASSED" if len(quality_flags) == 0 else "REVIEW",
+            "status": "PASSED" if validation_ready and not quality_flags else "REVIEW",
         },
     )

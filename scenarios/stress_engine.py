@@ -98,6 +98,10 @@ def scenario_to_macro_conditions(scenario_params: Dict[str, object]) -> Dict[str
         "cpi_yoy": 0.05 + (cpi - 0.05),
         "unemployment_rate": 0.32 + unemp_delta,
         "load_shedding_stage": int(np.clip(ls, 0, 8)),
+        "sovereign_cds_change_bps": _to_float(scenario_params.get("sovereign_cds_change_bps", 0), 0.0),
+        "sme_pd_multiplier": _to_float(scenario_params.get("sme_pd_multiplier", 1.0), 1.0),
+        "operational_shock_ecap_mult": _to_float(scenario_params.get("operational_shock_ecap_mult", 1.0), 1.0),
+        "zar_usd_vol_change": _to_float(scenario_params.get("zar_usd_vol_change", 0.0), 0.0),
         "benchmark_transition": bool(scenario_params.get("benchmark_transition", False)),
         "benchmark_transition_effective_from": scenario_params.get("effective_from"),
         "as_of_date": scenario_params.get("as_of_date"),
@@ -128,7 +132,10 @@ def scenario_to_market_data(scenario_params: Dict[str, object]) -> Dict[str, flo
         "sovereign_cds_change_bps": float(
             scenario_params.get("sovereign_cds_change_bps", 0)
         ),
-        "jse_property_change": -0.5 * ls / 8.0 - 0.3 * abs(gdp),
+        "jse_property_change": _to_float(
+            scenario_params.get("property_price_shock_pct", -0.5 * ls / 8.0 - 0.3 * abs(gdp)),
+            -0.5 * ls / 8.0 - 0.3 * abs(gdp),
+        ),
         "zar_usd_vol_change": _to_float(scenario_params.get("zar_usd_vol_change", 0.0), 0.0),
     }
 
@@ -236,6 +243,9 @@ def compute_scenario_shock_summary(scenario_params: Dict[str, object]) -> pd.Dat
         "sovereign_cds_change_bps": "Sovereign CDS (bps change)",
         "zar_usd_vol_change": "ZAR/USD Volatility (change)",
         "unemployment_change": "Unemployment (pp change)",
+        "operational_shock_ecap_mult": "Operational loss severity multiplier",
+        "property_price_shock_pct": "Property price shock",
+        "sme_pd_multiplier": "SME PD multiplier",
     }
 
     for key, label in labels.items():
@@ -251,6 +261,8 @@ def compute_scenario_shock_summary(scenario_params: Dict[str, object]) -> pd.Dat
                 display = f"Stage {int(v0)}-{int(v1)}"
             elif is_bps:
                 display = f"{int(v0)} to {int(v1)} bps"
+            elif "multiplier" in key:
+                display = f"{v0:.2f}x to {v1:.2f}x"
             else:
                 display = f"{v0 * 100:+.1f}% to {v1 * 100:+.1f}%"
             rows.append({"Shock Driver": label, "Range": display})
@@ -258,6 +270,8 @@ def compute_scenario_shock_summary(scenario_params: Dict[str, object]) -> pd.Dat
             fv = float(v) if not isinstance(v, (int, float)) else float(v)
             if is_bps:
                 display = f"{fv:+.0f} bps"
+            elif "multiplier" in key:
+                display = f"{fv:.2f}x"
             elif is_stage:
                 display = f"Stage {int(fv)}"
             else:

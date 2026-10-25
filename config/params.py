@@ -64,14 +64,21 @@ LEVERAGE_REQUIREMENTS: Dict[str, float] = {
     "d_sib_buffer_scaling": 0.50,
 }
 
-# Basel III output floor: floored RWA = max(modelled RWA, floor_pct x standardised RWA).
-# Fully phased-in floor is 72.5% (2030); SA phase-in per Regulation 38 amendments.
+# South African output-floor phase-in per Prudential Authority Circular C4/2025.
+# These are effective dates, rather than calendar-year labels: 60% starts
+# 2025-07-01, 65% on 2026-01-01, 70% on 2027-01-01, and 72.5% on 2028-01-01.
+# The engine's standardised RWA remains an explicitly incomplete proxy.
 OUTPUT_FLOOR: Dict[str, object] = {
     "floor_pct": 0.725,
     "phase_in": {
-        2023: 0.50, 2024: 0.55, 2025: 0.60, 2026: 0.65,
-        2027: 0.70, 2028: 0.725, 2029: 0.725, 2030: 0.725,
+        "2025-07-01": 0.60,
+        "2026-01-01": 0.65,
+        "2027-01-01": 0.70,
+        "2028-01-01": 0.725,
     },
+    "pre_implementation_pct": 0.0,
+    "source": "PA Circular C4/2025, section 1.1.1",
+    "source_url": "https://www.resbank.co.za/content/dam/sarb/publications/prudential-authority/pa-deposit-takers/banks-circulars/2025/C4-2025-Basel%20III%20post-crisis%20reforms%20reporting.pdf",
 }
 
 # -----------------------------------------------------------------------------
@@ -83,6 +90,11 @@ NEDBANK_ECAP_BENCHMARK_2024: Dict[str, float] = {
     "operational_risk_pct": 0.08,
     "business_risk_pct": 0.06,
     "model_risk_pct": 0.02,
+    # Explicit residual to complete the minimum risk-component mix to 100%.
+    # This residual is an assumption because the public headline taxonomy does
+    # not provide a directly reconcilable component split for this prototype.
+    "other_risk_pct": 0.03,
+    # Deterministic stress overlay, held outside the minimum component mix.
     "stress_buffer_pct": 0.07,
     "afr_coverage_ratio": 1.70,
     "total_ecap_to_rwa": 0.155,
@@ -160,6 +172,43 @@ SA_DSIB_BENCHMARKS_2024: Dict[str, Dict[str, float]] = {
         "leverage": 0.181, "credit_rwa_share": 0.67, "oprisk_rwa_share": 0.12,
         "market_rwa_share": 0.0005, "lcr": 23.18, "nsfr": 2.207,
         "total_exposure_bn": 230.0, "is_dsib": 0.0,
+    },
+}
+
+# Public primary-source references for the static benchmark inputs above.
+# These are source documents for inspection; fields in the comparison table
+# are not all directly reported on a consistent scope/denominator. In
+# particular, ECL/EAD is the prototype calibration target, not a bank metric.
+SA_BANK_BENCHMARK_SOURCES_2024: Dict[str, Dict[str, str]] = {
+    "Standard_Bank": {
+        "title": "Standard Bank Group Risk and Capital Management Report 2024",
+        "url": "https://www.standardbank.com/static_file/StandardBankGroup/filedownloads/RTS/2024/SBG_RiskandCapitalManagementReport2024.pdf",
+        "scope": "Standard Bank Group; year ended 31 December 2024",
+    },
+    "FirstRand": {
+        "title": "FirstRand Basel Pillar 3 Standardised Disclosures, December 2024",
+        "url": "https://www.firstrand.co.za/media/investors/basel-pillar-3-disclosure/firstrand-standardised-disclosures-december-2024.pdf",
+        "scope": "FirstRand Limited consolidated group; 31 December 2024",
+    },
+    "Absa": {
+        "title": "Absa Group Pillar 3 Risk Management Report, 31 December 2024",
+        "url": "https://www.absa.africa/wp-content/uploads/2025/03/Absa-Group-Pillar-3-risk-management-report-as-at-31-December-2024.pdf",
+        "scope": "Absa Group consolidated; 31 December 2024",
+    },
+    "Nedbank": {
+        "title": "Nedbank Risk and Capital Management Report (Pillar 3), 31 December 2024",
+        "url": "https://group.nedbank.co.za/content/dam/group/pdf/23_capital-and-risk-management-reports/00_pillar-3-reports/risk-and-capital-management-report-as-at-31-december-2024.pdf",
+        "scope": "Nedbank Group and Nedbank Limited; 31 December 2024",
+    },
+    "Investec": {
+        "title": "Investec Limited 2024 Annual Reports and Pillar 3 disclosures",
+        "url": "https://www.investec.com/en_za/welcome-to-investec/about-us/investor-relations/integrated-reporting.html",
+        "scope": "Investec Limited; financial year ended 31 March 2024",
+    },
+    "Capitec": {
+        "title": "Capitec Bank Holdings Integrated Annual Report 2024",
+        "url": "https://www.capitecbank.co.za/globalassets/pages/investor-relations/financial-results/2024/annual-report/integrated_annual_report_2024.pdf",
+        "scope": "Capitec Bank Holdings; year ended 29 February 2024",
     },
 }
 

@@ -318,7 +318,7 @@ def run_engine_end_to_end(
     )
     ead_scaling_factor = float(base_ifrs9_df.attrs["exposure_scaling_factor"])
     base_ifrs9_df, ecl_calibration = calibrate_ecl_to_target(
-        base_ifrs9_df, calib_targets["ecl_ead_ratio"]
+        base_ifrs9_df, calib_targets["ecl_ead_ratio"], macro_conditions=base_macro
     )
     lgd_calibration = solve_lgd_calibration_factor(
         base_ifrs9_df, calib_targets["credit_rwa_density"]
@@ -327,7 +327,7 @@ def run_engine_end_to_end(
     # 3c. Apply the base-anchored scaling and calibration to the scenario run.
     ifrs9_df = scale_portfolio_by_factor(ifrs9_df, ead_scaling_factor)
     ifrs9_df = apply_pd_calibration(
-        ifrs9_df, ecl_calibration["pd_calibration_factor"]
+        ifrs9_df, ecl_calibration["pd_calibration_factor"], macro_conditions=macro_cond
     )
 
     ecl_total = float(post_sum(ifrs9_df["ecl"].tolist()))
@@ -350,6 +350,7 @@ def run_engine_end_to_end(
     rwa_result = compute_total_rwa(
         ifrs9_df, macro_cond, bank_profile=bank_profile,
         lgd_calibration_factor=lgd_calibration["lgd_calibration_factor"],
+        as_of_date=business_date,
     )
     total_rwa = float(rwa_result["total_rwa"])
 
@@ -359,6 +360,7 @@ def run_engine_end_to_end(
     base_rwa_result = compute_total_rwa(
         base_ifrs9_df, base_macro, bank_profile=bank_profile,
         lgd_calibration_factor=lgd_calibration["lgd_calibration_factor"],
+        as_of_date=business_date,
     )
     regcap_analysis = run_full_regcap_analysis(
         ifrs9_df, rwa_result, ecl_total, macro_cond, institution_size,
@@ -385,12 +387,14 @@ def run_engine_end_to_end(
         macro_cond,
         n_sims=max(500, n_mc_sims // 2),
         seed=seed + 1,
+        scenario_shocks=mkt_data,
     )
     op_mc = compute_operational_ecap(
         ead_total * 1.1,
         n_scenarios=max(50, n_mc_sims // 10),
         ls_stage=macro_cond.get("load_shedding_stage", 2),
         seed=seed + 2,
+        operational_shock_multiplier=macro_cond.get("operational_shock_ecap_mult", 1.0),
     )
 
     # 8. Nedbank 2024 benchmark ECap allocation
@@ -408,7 +412,15 @@ def run_engine_end_to_end(
         regcap_analysis["capital_resources"]["Total Capital Available"]
         + max(0.0, ecl_total * 0.30)
     )
-    coverage = compute_afr_coverage_ratio(afr, ecap_alloc["total_ecap"], ecap_alloc["components"])
+    coverage = compute_afr_coverage_ratio(
+        afr,
+        ecap_alloc["total_ecap"],
+        ecap_alloc["components"],
+        resource_basis=(
+            "Illustrative proxy: benchmark-constructed regulatory capital resources "
+            "plus 30% of modelled ECL; not actual bank AFR"
+        ),
+    )
 
     scenario_shocks: Dict[str, float] = {
         "gdp_shock": float(macro_cond.get("gdp_yoy", 0.0)) - 0.015,
@@ -576,48 +588,52 @@ def _compute_uncertainty_bands(
     credit_mc: Dict[str, Any],
     coverage: Dict[str, Any],
 ) -> Dict[str, Dict[str, float]]:
-    """Return central estimate + 95% CI + model-risk for 5 headline metrics."""
+    """Return central estimates and heuristic ranges, never statistical CIs."""
     losses = np.asarray(credit_mc["simulated_losses"], dtype=float)
     credit_ecap_999 = float(credit_mc["credit_ecap_999"])
     n = int(losses.size)
 
     model_risk_pct = float(NEDBANK_ECAP_BENCHMARK_2024["model_risk_pct"]) + 0.03
-    estimation_error = float(np.std(losses) * 1.96 / np.sqrt(n)) if n > 0 else 0.0
-
     total_ecap = float(ecap_alloc["total_ecap"])
     ecl = float(ifrs9_df["ecl"].sum())
     car = float(regcap_analysis["capital_ratios"]["Total CAR"])
 
-    bands: Dict[str, Dict[str, float]] = {
+    bands: Dict[str, Dict[str, Any]] = {
         "ECL": {
             "central": ecl,
-            "lower_95": float(max(0.0, ecl * (1.0 - 0.15))),
-            "upper_95": float(ecl * (1.0 + 0.20)),
+            "illustrative_lower": float(max(0.0, ecl * (1.0 - 0.15))),
+            "illustrative_upper": float(ecl * (1.0 + 0.20)),
             "model_risk": float(ecl * model_risk_pct),
+            "range_type": "Heuristic sensitivity range; not a confidence interval",
         },
         "Credit ECap (99.9)": {
             "central": credit_ecap_999,
-            "lower_95": float(max(0.0, credit_ecap_999 - 2.0 * estimation_error)),
-            "upper_95": float(credit_ecap_999 + 2.0 * estimation_error),
             "model_risk": float(credit_ecap_999 * model_risk_pct),
+            "range_type": "Withheld: empirical 99.9% tail is not decision-grade",
+            "tail_observations": int(credit_mc.get("tail_observations_999", 0)),
+            "expected_tail_observations": float(credit_mc.get("expected_tail_observations_999", 0.0)),
+            "tail_estimate_warning": bool(credit_mc.get("tail_estimate_warning", True)),
         },
         "Total ECap": {
             "central": total_ecap,
-            "lower_95": float(max(0.0, total_ecap * (1.0 - 0.10))),
-            "upper_95": float(total_ecap * (1.0 + 0.15)),
+            "illustrative_lower": float(max(0.0, total_ecap * (1.0 - 0.10))),
+            "illustrative_upper": float(total_ecap * (1.0 + 0.15)),
             "model_risk": float(total_ecap * model_risk_pct),
+            "range_type": "Heuristic sensitivity range; hybrid components are not a common quantile",
         },
         "Total CAR": {
             "central": car,
-            "lower_95": float(max(0.0, car - 0.01)),
-            "upper_95": float(car + 0.01),
+            "illustrative_lower": float(max(0.0, car - 0.01)),
+            "illustrative_upper": float(car + 0.01),
             "model_risk_bps": 25.0,
+            "range_type": "Illustrative +/- 1 percentage point sensitivity; not a confidence interval",
         },
         "Coverage Ratio": {
             "central": float(coverage["Coverage Ratio"]),
-            "lower_95": float(max(0.5, coverage["Coverage Ratio"] - 0.12)),
-            "upper_95": float(coverage["Coverage Ratio"] + 0.12),
+            "illustrative_lower": float(max(0.0, coverage["Coverage Ratio"] - 0.12)),
+            "illustrative_upper": float(coverage["Coverage Ratio"] + 0.12),
             "model_risk": float(coverage["Coverage Ratio"] * model_risk_pct),
+            "range_type": "Illustrative sensitivity range; proxy AFR and ECap inputs",
         },
     }
     return bands

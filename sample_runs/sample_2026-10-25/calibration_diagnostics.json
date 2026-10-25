@@ -1,0 +1,107 @@
+{
+  "Adverse": {
+    "achieved_credit_rwa_density": 0.3455808994492108,
+    "achieved_ecl_ead_ratio": 0.014999991129302535,
+    "bank_profile": "D_SIB_AVERAGE",
+    "credit_rwa_calibration_adjusted_parameter": "ordinary LGD calibration scalar used by prototype RWA engine",
+    "credit_rwa_calibration_converged": true,
+    "credit_rwa_calibration_iterations": 13,
+    "credit_rwa_density_residual": -1.9100550789186155e-05,
+    "credit_rwa_target_attainable": true,
+    "ead_scaling_factor": 0.5653649195405417,
+    "ecl_calibration_converged": true,
+    "ecl_ead_ratio_residual": -8.870697464774535e-09,
+    "ecl_target_attainable": true,
+    "initial_credit_rwa_density": 0.7364241993335333,
+    "lgd_calibration_factor": 0.469268798828125,
+    "lgd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "pd_calibration_adjusted_parameter": "PIT/lifetime PD scalar; staging recomputed when macro conditions are supplied",
+    "pd_calibration_factor": 0.4689648151397705,
+    "pd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "raw_ecl_ead_ratio": 0.03204650028761242,
+    "raw_pd_calibration_factor": 0.4680698318186792,
+    "target_credit_rwa_density": 0.34559999999999996,
+    "target_ecl_ead_ratio": 0.015,
+    "targets": {
+      "credit_rwa_density": 0.34559999999999996,
+      "ecl_ead_ratio": 0.015,
+      "rwa_density": 0.48
+    }
+  },
+  "Base": {
+    "achieved_credit_rwa_density": 0.3455808994492108,
+    "achieved_ecl_ead_ratio": 0.014999991129302535,
+    "bank_profile": "D_SIB_AVERAGE",
+    "credit_rwa_calibration_adjusted_parameter": "ordinary LGD calibration scalar used by prototype RWA engine",
+    "credit_rwa_calibration_converged": true,
+    "credit_rwa_calibration_iterations": 13,
+    "credit_rwa_density_residual": -1.9100550789186155e-05,
+    "credit_rwa_target_attainable": true,
+    "ead_scaling_factor": 0.5653649195405417,
+    "ecl_calibration_converged": true,
+    "ecl_ead_ratio_residual": -8.870697464774535e-09,
+    "ecl_target_attainable": true,
+    "initial_credit_rwa_density": 0.7364241993335333,
+    "lgd_calibration_factor": 0.469268798828125,
+    "lgd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "pd_calibration_adjusted_parameter": "PIT/lifetime PD scalar; staging recomputed when macro conditions are supplied",
+    "pd_calibration_factor": 0.4689648151397705,
+    "pd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "raw_ecl_ead_ratio": 0.03204650028761242,
+    "raw_pd_calibration_factor": 0.4680698318186792,
+    "target_credit_rwa_density": 0.34559999999999996,
+    "target_ecl_ead_ratio": 0.015,
+    "targets": {
+      "credit_rwa_density": 0.34559999999999996,
+      "ecl_ead_ratio": 0.015,
+      "rwa_density": 0.48
+    }
+  },
+  "Severe": {
+    "achieved_credit_rwa_density": 0.3455808994492108,
+    "achieved_ecl_ead_ratio": 0.014999991129302535,
+    "bank_profile": "D_SIB_AVERAGE",
+    "credit_rwa_calibration_adjusted_parameter": "ordinary LGD calibration scalar used by prototype RWA engine",
+    "credit_rwa_calibration_converged": true,
+    "credit_rwa_calibration_iterations": 13,
+    "credit_rwa_density_residual": -1.9100550789186155e-05,
+    "credit_rwa_target_attainable": true,
+    "ead_scaling_factor": 0.5653649195405417,
+    "ecl_calibration_converged": true,
+    "ecl_ead_ratio_residual": -8.870697464774535e-09,
+    "ecl_target_attainable": true,
+    "initial_credit_rwa_density": 0.7364241993335333,
+    "lgd_calibration_factor": 0.469268798828125,
+    "lgd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "pd_calibration_adjusted_parameter": "PIT/lifetime PD scalar; staging recomputed when macro conditions are supplied",
+    "pd_calibration_factor": 0.4689648151397705,
+    "pd_factor_bounds": [
+      0.25,
+      4.0
+    ],
+    "raw_ecl_ead_ratio": 0.03204650028761242,
+    "raw_pd_calibration_factor": 0.4680698318186792,
+    "target_credit_rwa_density": 0.34559999999999996,
+    "target_ecl_ead_ratio": 0.015,
+    "targets": {
+      "credit_rwa_density": 0.34559999999999996,
+      "ecl_ead_ratio": 0.015,
+      "rwa_density": 0.48
+    }
+  }
+}

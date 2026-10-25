@@ -1,0 +1,16 @@
+{
+  "as_of_date": "2026-10-20",
+  "bank_profile": "D_SIB_AVERAGE",
+  "copula_type": "t",
+  "data_source": "synthetic",
+  "n_accounts": 100,
+  "n_mc_sims": 300,
+  "scenario_set": [
+    "Base",
+    "Adverse",
+    "Severe"
+  ],
+  "seed": 2024,
+  "t_df": 6,
+  "total_exposure_zar": 100000000000
+}

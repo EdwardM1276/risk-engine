@@ -105,6 +105,10 @@ class EngineBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(
             calib["achieved_credit_rwa_density"], calib["target_credit_rwa_density"], delta=0.02
         )
+        self.assertTrue(calib["credit_rwa_target_attainable"])
+        self.assertTrue(calib["credit_rwa_calibration_converged"])
+        self.assertLessEqual(abs(calib["credit_rwa_density_residual"]), 1e-4)
+        self.assertTrue(calib["ecl_calibration_converged"])
 
     def test_benchmark_comparison_includes_engine_and_all_banks(self):
         bench = self.result["benchmark_comparison"]

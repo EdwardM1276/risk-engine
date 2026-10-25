@@ -145,6 +145,7 @@ def convert_ttc_to_pit(
             mult *= 1.0 + (ls_stage / 8.0) * ls_vuln * 2.8
             mult *= 1.0 + (gdp_yoy - 0.015) * (-5.0)
             mult *= 1.0 + (unemp - 0.32) * 1.5
+            mult *= max(float(macro_conditions.get("sme_pd_multiplier", 1.0)), 1.0)
         elif "Corporate" in seg:
             mult *= 1.0 + (ls_stage / 8.0) * ls_vuln * 1.2
             mult *= 1.0 + (gdp_yoy - 0.015) * (-3.5)

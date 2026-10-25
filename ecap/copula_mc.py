@@ -41,13 +41,60 @@ def build_factor_correlation_matrix(
     return R
 
 
+def repair_correlation_matrix(
+    matrix: np.ndarray,
+    eigenvalue_floor: float = 1e-8,
+) -> tuple[np.ndarray, Dict[str, object]]:
+    """Project a symmetric matrix to a positive-definite correlation matrix.
+
+    The returned diagnostics quantify the adjustment so model inputs are not
+    silently repaired. Large corrections should trigger model review.
+    """
+    original = np.asarray(matrix, dtype=float)
+    if original.ndim != 2 or original.shape[0] != original.shape[1]:
+        raise ValueError("correlation matrix must be square")
+    if not np.isfinite(original).all():
+        raise ValueError("correlation matrix must contain only finite values")
+    if eigenvalue_floor <= 0:
+        raise ValueError("eigenvalue_floor must be positive")
+
+    symmetric = 0.5 * (original + original.T)
+    np.fill_diagonal(symmetric, 1.0)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    minimum_before = float(eigenvalues.min())
+    clipped_eigenvalues = np.maximum(eigenvalues, eigenvalue_floor)
+    projected = (eigenvectors * clipped_eigenvalues) @ eigenvectors.T
+    scale = np.sqrt(np.maximum(np.diag(projected), eigenvalue_floor))
+    repaired = projected / np.outer(scale, scale)
+    repaired = np.clip(0.5 * (repaired + repaired.T), -1.0, 1.0)
+    np.fill_diagonal(repaired, 1.0)
+    minimum_after = float(np.linalg.eigvalsh(repaired).min())
+    delta = repaired - original
+    frobenius = float(np.linalg.norm(delta, ord="fro"))
+    max_change = float(np.max(np.abs(delta)))
+    diagnostics: Dict[str, object] = {
+        "matrix_repaired": bool(frobenius > 1e-12),
+        "minimum_eigenvalue_before": minimum_before,
+        "minimum_eigenvalue_after": minimum_after,
+        "frobenius_adjustment": frobenius,
+        "max_element_adjustment": max_change,
+        "warning": bool(frobenius > 0.05),
+    }
+    return repaired, diagnostics
+
+
 def compute_convergence_diagnostics(
     losses: np.ndarray,
     confidence_level: float = 0.999,
     checkpoints: Optional[List[float]] = None,
     tolerance: float = 0.05,
 ) -> Dict[str, object]:
-    """Measure tail-estimate movement across cumulative simulation checkpoints."""
+    """Report exploratory prefix stability, which is not tail validation.
+
+    Checkpoints reuse nested samples from one seed. Passing this diagnostic
+    therefore cannot establish independent replication stability or justify a
+    formal interval.
+    """
     values = np.asarray(losses, dtype=float)
     if values.size == 0:
         raise ValueError("losses must contain at least one observation")
@@ -66,13 +113,18 @@ def compute_convergence_diagnostics(
         abs(estimates[index] - estimates[index - 1]) / max(abs(estimates[index - 1]), 1.0)
         for index in range(1, len(estimates))
     ]
+    checkpoint_stable = bool(relative_changes and relative_changes[-1] <= tolerance)
     return {
         "confidence_level": float(confidence_level),
         "checkpoints": [float(point) for point in points],
         "simulation_counts": counts,
         "tail_estimates": estimates,
         "relative_changes": relative_changes,
-        "converged": bool(relative_changes and relative_changes[-1] <= tolerance),
+        "checkpoint_stable": checkpoint_stable,
+        "converged": False,
+        "independent_replicates": 1,
+        "formal_interval_available": False,
+        "interpretation": "Nested prefix stability only; not evidence of extreme-tail accuracy",
         "tolerance": float(tolerance),
     }
 
@@ -113,12 +165,9 @@ def simulate_copula_defaults(
     n_loans = len(portfolio_df)
     seg_idx = np.array([seg_list.index(s) if s in seg_list else 3 for s in segments], dtype=int)
 
-    R = build_factor_correlation_matrix(seg_list, macro_conditions)
-    try:
-        L = np.linalg.cholesky(R)
-    except np.linalg.LinAlgError:
-        R = 0.5 * (R + R.T) + np.eye(len(seg_list)) * 0.001
-        L = np.linalg.cholesky(R)
+    raw_correlation = build_factor_correlation_matrix(seg_list, macro_conditions)
+    R, correlation_diagnostics = repair_correlation_matrix(raw_correlation)
+    L = np.linalg.cholesky(R)
 
     seg_corr_values = np.array([PORTFOLIO_SEGMENTS[s]["corr"] for s in segments], dtype=float)
     systematic_loading = np.sqrt(np.clip(seg_corr_values, 0.0, 0.99))
@@ -152,8 +201,17 @@ def simulate_copula_defaults(
     el = float(np.mean(losses))
     ul999 = float(var_dict.get(0.999, el + 3.09 * np.std(losses)))
     ecap = max(ul999 - el, 0.0)
-    tail_count_999 = max(1, int(np.ceil(n_sims * (1.0 - 0.999))))
+    expected_tail_count_999 = n_sims * (1.0 - 0.999)
+    tail_count_999 = max(1, n_sims - int(np.floor(n_sims * 0.999)))
     convergence = compute_convergence_diagnostics(losses)
+    warnings = []
+    if correlation_diagnostics["warning"]:
+        warnings.append(
+            "Factor correlation matrix required a material positive-definite repair; "
+            "review the stated adjustment before interpreting results."
+        )
+    if tail_count_999 < 1000:
+        warnings.append("Empirical 99.9% tail is inadequately sampled for decision-grade interpretation.")
     return {
         "simulated_losses": losses,
         "expected_loss": el,
@@ -165,8 +223,13 @@ def simulate_copula_defaults(
         "n_sims": int(n_sims),
         "copula_type": copula_name,
         "tail_observations_999": int(tail_count_999),
-        "tail_estimate_warning": bool(tail_count_999 < 100),
+        "expected_tail_observations_999": float(expected_tail_count_999),
+        "independent_replicates": 1,
+        "tail_estimate_warning": bool(tail_count_999 < 1000),
+        "tail_estimate_status": "Exploratory; no formal uncertainty interval or validated convergence claim",
         "convergence": convergence,
+        "correlation_matrix_diagnostics": correlation_diagnostics,
+        "warnings": warnings,
     }
 
 
@@ -175,6 +238,7 @@ def compute_market_risk_ecap(
     macro_conditions: Optional[Dict[str, float]] = None,
     n_sims: int = 2000,
     seed: int = 2025,
+    scenario_shocks: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
     """FRTB-style Expected Shortfall 97.5% across 6 correlated market risk factors."""
     rng = np.random.default_rng(seed)
@@ -190,12 +254,26 @@ def compute_market_risk_ecap(
     np.fill_diagonal(corr, 1.0)
     L = np.linalg.cholesky(corr)
     exposure = total_assets * 0.30
+    shocks = scenario_shocks or {}
+    commodity_return = float(np.mean([
+        float(shocks.get("gold_price_change", 0.0)),
+        float(shocks.get("platinum_price_change", 0.0)),
+        float(shocks.get("coal_price_change", 0.0)),
+    ]))
+    scenario_returns = np.array([
+        0.0,
+        0.0,
+        0.0,
+        float(shocks.get("jse_property_change", 0.0)),
+        commodity_return,
+        -float(shocks.get("sovereign_cds_change_bps", 0.0)) / 10000.0,
+    ])
 
     pnls = np.zeros(n_sims, dtype=float)
     for s in range(n_sims):
         z = L @ rng.standard_normal(6)
         ret = z * vols
-        pnls[s] = -exposure * float(np.sum(ret * weights))
+        pnls[s] = -exposure * float(np.sum((ret + scenario_returns) * weights))
 
     sorted_pnls = np.sort(pnls)
     idx975 = int(np.floor(n_sims * 0.975))
@@ -213,15 +291,18 @@ def compute_operational_ecap(
     n_scenarios: int = 50,
     ls_stage: int = 2,
     seed: int = 2026,
+    operational_shock_multiplier: float = 1.0,
 ) -> Dict[str, float]:
     """Prototype operational-risk scenario simulation with loadshedding uplift.
 
     This is not a claim to implement the Basel Standardised Measurement
     Approach or any current supervisory operational-risk framework.
     """
+    if not np.isfinite(operational_shock_multiplier) or operational_shock_multiplier < 1.0:
+        raise ValueError("operational_shock_multiplier must be finite and at least 1")
     rng = np.random.default_rng(seed)
     gi = total_assets * 0.035
-    factor = 1.0 + (float(ls_stage) / 8.0) * 0.6
+    factor = (1.0 + (float(ls_stage) / 8.0) * 0.6) * operational_shock_multiplier
 
     losses = []
     for _ in range(n_scenarios):
@@ -237,4 +318,5 @@ def compute_operational_ecap(
         "operational_ecap": float(ecap),
         "op_loss_sims": losses_arr,
         "op_VaR_999": var999,
+        "operational_shock_multiplier": float(operational_shock_multiplier),
     }

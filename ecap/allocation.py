@@ -38,6 +38,7 @@ def allocate_nedbank_ecap_benchmark(
     op = benchmark_total * w["operational_risk_pct"]
     business = benchmark_total * w["business_risk_pct"]
     model = benchmark_total * w["model_risk_pct"]
+    other = benchmark_total * w["other_risk_pct"]
     stress = benchmark_total * w["stress_buffer_pct"]
     supplied = any(value is not None for value in (
         credit_ecap_from_simulation,
@@ -54,21 +55,24 @@ def allocate_nedbank_ecap_benchmark(
     if operational_ecap_from_simulation is not None:
         op = max(float(operational_ecap_from_simulation), 0.0)
 
-    total_ecap = float(post_sum([credit, market, op, business, model, stress]))
-    model_floor = total_ecap * MODEL_RISK_ALLOCATION
-    if model < model_floor:
-        shortfall = model_floor - model
-        model = model_floor
-        credit = max(credit - shortfall * 0.6, 0.0)
-        stress = max(stress - shortfall * 0.4, 0.0)
-
-    total = float(post_sum([credit, market, op, business, model, stress]))
+    risk_mix = {
+        "Credit Risk ECap": float(w["credit_risk_pct"]),
+        "Market Risk ECap": float(w["market_risk_pct"]),
+        "Operational Risk ECap": float(w["operational_risk_pct"]),
+        "Business Risk ECap": float(w["business_risk_pct"]),
+        "Model Risk ECap": float(w["model_risk_pct"]),
+        "Other Risk ECap": float(w["other_risk_pct"]),
+    }
+    risk_mix_total = float(sum(risk_mix.values()))
+    if not np.isclose(risk_mix_total, 1.0, atol=1e-10):
+        raise ValueError(f"ECap minimum risk mix must sum to 100%; got {risk_mix_total:.6f}")
+    total = float(post_sum([credit, market, op, business, model, other, stress]))
     return {
         "total_ecap": float(total),
         "benchmark_total_ecap": float(benchmark_total),
         "allocation_method": (
-            "Simulated component aggregation with benchmark fallbacks"
-            if supplied else "Nedbank benchmark allocation"
+            "Hybrid economic-capital indicator (simulation + benchmark fallbacks + stress overlay)"
+            if supplied else "Hybrid benchmark-derived economic-capital indicator + stress overlay"
         ),
         "components": {
             "Credit Risk ECap": float(credit),
@@ -76,16 +80,15 @@ def allocate_nedbank_ecap_benchmark(
             "Operational Risk ECap": float(op),
             "Business Risk ECap": float(business),
             "Model Risk ECap": float(model),
+            "Other Risk ECap (benchmark residual)": float(other),
             "Stress Buffer ECap": float(stress),
         },
-        "weights": {k: float(v) for k, v in [
-            ("Credit Risk %", w["credit_risk_pct"]),
-            ("Market Risk %", w["market_risk_pct"]),
-            ("Operational Risk %", w["operational_risk_pct"]),
-            ("Business Risk %", w["business_risk_pct"]),
-            ("Model Risk %", w["model_risk_pct"]),
-            ("Stress Buffer %", w["stress_buffer_pct"]),
-        ]},
+        "aggregation_policy": "Hybrid economic-capital indicator: supplied credit, market and operational measures replace benchmark fallbacks; business, model and other components are benchmark-derived; stress is a deterministic overlay. No cross-risk diversification is applied.",
+        "minimum_risk_mix_weights": risk_mix,
+        "minimum_risk_mix_weight_sum": risk_mix_total,
+        "stress_buffer_pct_of_benchmark_total": float(w["stress_buffer_pct"]),
+        "weights": risk_mix,
+        "model_risk_allocation_floor_configured": float(MODEL_RISK_ALLOCATION),
         "total_ecap_pct_rwa": float(total / max(total_rwa, 1.0)),
         "ecl_vs_ecap_ratio": float(ifrs9_ecl_total / max(total, 1.0)),
     }

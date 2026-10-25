@@ -1,0 +1,49 @@
+{
+  "current_rates": {},
+  "data_source": "synthetic",
+  "gap_flags": [],
+  "n_accounts": 100,
+  "n_records": 36,
+  "placeholder_fields": [],
+  "raw_artifacts": [
+    {
+      "media_type": "text/csv",
+      "path": "data\\raw\\20261025T152235_normalized_macro_7aab853cf407.csv",
+      "provider": "normalized_macro",
+      "retrieved_at": "2026-10-25T15:22:35",
+      "sha256": "7aab853cf40758ca3c2a7299b874e0337fe70df3262d56992ee4b8ebc7ed5ee5",
+      "source_url": "Synthetic research generator"
+    },
+    {
+      "media_type": "text/csv",
+      "path": "data\\raw\\20261025T152235_normalized_loadshedding_4c2d8297f18c.csv",
+      "provider": "normalized_loadshedding",
+      "retrieved_at": "2026-10-25T15:22:35",
+      "sha256": "4c2d8297f18c555db28069779e67dda2a50128cb344d327f81ed0255f234533a",
+      "source_url": "Synthetic research generator"
+    },
+    {
+      "media_type": "text/csv",
+      "path": "data\\raw\\20261025T152235_normalized_markets_9f89280853c7.csv",
+      "provider": "normalized_markets",
+      "retrieved_at": "2026-10-25T15:22:35",
+      "sha256": "9f89280853c7a3d0ac8729b0b97850907c4ac3ed64b4eb41c8fb92abd2c06d0a",
+      "source_url": "Synthetic research generator"
+    },
+    {
+      "media_type": "text/csv",
+      "path": "data\\raw\\20261025T152235_normalized_portfolio_66f49fbad288.csv",
+      "provider": "normalized_portfolio",
+      "retrieved_at": "2026-10-25T15:22:35",
+      "sha256": "66f49fbad288ba5194c89142ace3140b5489ef438daa3239f84940d38d6432f4",
+      "source_url": "Synthetic research generator"
+    }
+  ],
+  "source_notes": {
+    "all": "Synthetic research generator"
+  },
+  "status": "REVIEW",
+  "synthetic_fallback_used": false,
+  "total_exposure_requested": 100000000000.0,
+  "validation_ready": false
+}

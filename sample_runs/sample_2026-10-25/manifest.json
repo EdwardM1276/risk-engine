@@ -1,0 +1,164 @@
+{
+  "code_sha256": {
+    "config/params.py": "9d786609e2a9252d2a517a59fc058f489af547c17d860bf79c05a94455aea4a9",
+    "config/rates.json": "9d78867c04e3cb1c5d26606c2e2dc3befd8d5d74f1e516ee50622fcbfa3c036a",
+    "data/acquisition.py": "73eb9c0061fa31cc39a9c361891b603c1f0ddf65bf7ee457d27eda24da5a946d",
+    "ecap/allocation.py": "d8fd9a38910d3d80d0a2f04b4af6f75add0c0f3973e425a63831a0528f396334",
+    "ecap/copula_mc.py": "3549f3ce3a590b613240b60819d562686346401944bf0c6066e54cd0c1935e1a",
+    "ecap/coverage.py": "c89d8eae462e9c9cbca659c91f4be35277f97d6d38a55a9709fdff64af42b622",
+    "ifrs9/pd_model.py": "27d82d6db95706ece01eaf3c341641718b828eb222af77ea053cac5e12648a00",
+    "ifrs9/staging.py": "609bf062e2e6c5d273ecbbd40e24616b87111d2f2913927c267a32f208177b01",
+    "regcap/rwa_engine.py": "a2cfe937458794bd22e6491bcb02e0edb875effe6ce91b095ceffc9d8d44dfb9",
+    "run.py": "2d8a3fc980a5fa76ad6d5d474c1260daccee6e6e041dfaf46b51c69a0885af54",
+    "scenarios/stress_engine.py": "528a91a01d7a4f8a3b9dc468379911d6c4065507c7d415215d8558fef7401f8a"
+  },
+  "config": {
+    "as_of_date": "2026-10-20",
+    "bank_profile": "D_SIB_AVERAGE",
+    "copula_type": "t",
+    "data_source": "synthetic",
+    "n_accounts": 100,
+    "n_mc_sims": 300,
+    "scenario_set": [
+      "Base",
+      "Adverse",
+      "Severe"
+    ],
+    "seed": 2024,
+    "t_df": 6,
+    "total_exposure_zar": 100000000000
+  },
+  "created_at_utc": "2026-10-25T13:22:39.777457+00:00",
+  "git_revision": "4b89985833c00dc5e9b98b2f6773c9e68ccf77c9",
+  "input_snapshots": {
+    "loadshedding": {
+      "columns": [
+        "date",
+        "load_shedding_stage",
+        "daily_hours_shed",
+        "monthly_gwh_lost"
+      ],
+      "file": "input_snapshots\\loadshedding.csv",
+      "rows": 36,
+      "sha256": "bf282299ff915072091bf2255ec3b6f0f618203237ca69d5f01db56cf3e84af4"
+    },
+    "macro": {
+      "columns": [
+        "date",
+        "repo_rate",
+        "prime_rate",
+        "cpi_yoy",
+        "gdp_yoy",
+        "unemployment_rate",
+        "zar_usd"
+      ],
+      "file": "input_snapshots\\macro.csv",
+      "rows": 36,
+      "sha256": "716fc3b812d3466e9035d7e87ff237402461fa7b94379e21a9c9523f73c9df31"
+    },
+    "markets": {
+      "columns": [
+        "date",
+        "jse_alsi",
+        "jse_property",
+        "sovereign_cds_bps",
+        "gold_price_zar",
+        "platinum_price_zar",
+        "coal_price_zar"
+      ],
+      "file": "input_snapshots\\markets.csv",
+      "rows": 36,
+      "sha256": "0635392b126b8afd4fbbca289dd6d38742ab66a177c3db3da1bbaf367b955fa7"
+    },
+    "portfolio": {
+      "columns": [
+        "account_id",
+        "segment",
+        "value_date",
+        "institution_size",
+        "province",
+        "principal_outstanding",
+        "undrawn_limit",
+        "collateral_value",
+        "loan_to_value",
+        "tenure_years",
+        "months_on_book",
+        "dpd",
+        "debt_review_flag",
+        "judgement_flag",
+        "administration_order",
+        "loadshedding_vulnerability_score",
+        "internal_rating",
+        "base_segment_ccf",
+        "base_segment_ttc_pd",
+        "base_segment_lgd",
+        "base_segment_corr"
+      ],
+      "file": "input_snapshots\\portfolio.csv",
+      "rows": 100,
+      "sha256": "dfeb0a394b2642367f08e73bb7c740e2727560754024da27b341d3bf8b330f6a"
+    },
+    "timeseries": {
+      "columns": [
+        "date",
+        "repo_rate",
+        "prime_rate",
+        "cpi_yoy",
+        "gdp_yoy",
+        "unemployment_rate",
+        "zar_usd",
+        "load_shedding_stage",
+        "daily_hours_shed",
+        "monthly_gwh_lost",
+        "jse_alsi",
+        "jse_property",
+        "sovereign_cds_bps",
+        "gold_price_zar",
+        "platinum_price_zar",
+        "coal_price_zar"
+      ],
+      "file": "input_snapshots\\timeseries.csv",
+      "rows": 36,
+      "sha256": "f263187fb2891b755b06558f9fd907404733ee1b2784953d75034395c3156570"
+    }
+  },
+  "limits": [
+    "Synthetic-known-truth demonstration only; not real-bank validation.",
+    "A 100-account, 300-simulation smoke run is not adequate for 99.9% tail accuracy.",
+    "Public-source raw snapshots are not represented by this synthetic package."
+  ],
+  "package_schema_version": 1,
+  "run_metadata": {
+    "Adverse": {
+      "config_digest": "5bfedef09768cf0e2da45f10d21e48964a65f4913a3b528679a0a8592e89956a",
+      "run_id": "5bfedef09768-005",
+      "snapshot_path": "C:\\Users\\27746\\OneDrive\\Desktop\\Projects\\Risk engine\\.worktrees\\remediation\\outputs\\runs\\5bfedef09768-005\\snapshot.json"
+    },
+    "Base": {
+      "config_digest": "b3e45659a336fc0c2bcf0cee061bec7ff4200a9eff406a6aeb103f4f869692da",
+      "run_id": "b3e45659a336-005",
+      "snapshot_path": "C:\\Users\\27746\\OneDrive\\Desktop\\Projects\\Risk engine\\.worktrees\\remediation\\outputs\\runs\\b3e45659a336-005\\snapshot.json"
+    },
+    "Severe": {
+      "config_digest": "330114257af4b18e45a6bf6c91288a35aaa6965d89ff15d8955925fadbf4e0ae",
+      "run_id": "330114257af4-005",
+      "snapshot_path": "C:\\Users\\27746\\OneDrive\\Desktop\\Projects\\Risk engine\\.worktrees\\remediation\\outputs\\runs\\330114257af4-005\\snapshot.json"
+    }
+  },
+  "runtime": {
+    "numpy": "1.26.4",
+    "pandas": "2.2.2",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.9.13 (tags/v3.9.13:6de2ca5, May 17 2022, 16:36:42) [MSC v.1929 64 bit (AMD64)]",
+    "scipy": "1.13.1"
+  },
+  "warnings": [
+    "Base: credit 99.9% tail is exploratory; only 1 order-statistic observation(s) and one seed/replicate. No formal confidence interval is reported.",
+    "Base: synthetic input is not validation-ready.",
+    "Adverse: credit 99.9% tail is exploratory; only 1 order-statistic observation(s) and one seed/replicate. No formal confidence interval is reported.",
+    "Adverse: synthetic input is not validation-ready.",
+    "Severe: credit 99.9% tail is exploratory; only 1 order-statistic observation(s) and one seed/replicate. No formal confidence interval is reported.",
+    "Severe: synthetic input is not validation-ready.",
+    "Severe: the factor correlation matrix required a material repair (Frobenius adjustment 0.416737)."
+  ]
+}

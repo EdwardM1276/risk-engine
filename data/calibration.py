@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from config.params import BANK_BENCHMARK_PROFILES, DEFAULT_BANK_PROFILE
-from ifrs9.staging import calculate_ecl
+from ifrs9.staging import assign_ifrs9_staging, calculate_ecl
 from regcap.rwa_engine import compute_credit_rwa
 
 LGD_FACTOR_BOUNDS: Tuple[float, float] = (0.25, 4.0)
@@ -36,57 +36,117 @@ PD_FACTOR_BOUNDS: Tuple[float, float] = (0.25, 4.0)
 def solve_lgd_calibration_factor(
     ifrs9_df: pd.DataFrame,
     target_credit_density: float,
-    max_iter: int = 6,
+    max_iter: int = 50,
     tol: float = 1e-4,
 ) -> Dict[str, float]:
     """Solve the LGD scalar so IRB credit RWA / EAD hits the target density."""
     ead_total = float(ifrs9_df["ead"].sum())
-    factor = 1.0
-    achieved = float("nan")
-    for _ in range(max_iter):
-        credit_df = compute_credit_rwa(ifrs9_df, lgd_calibration_factor=factor)
-        achieved = float(credit_df["credit_rwa"].sum()) / max(ead_total, 1.0)
-        if abs(achieved - target_credit_density) < tol:
-            break
-        factor = float(np.clip(factor * target_credit_density / max(achieved, 1e-9),
-                               *LGD_FACTOR_BOUNDS))
+    def density(factor_value: float) -> float:
+        credit_df = compute_credit_rwa(ifrs9_df, lgd_calibration_factor=factor_value)
+        return float(credit_df["credit_rwa"].sum()) / max(ead_total, 1.0)
+
+    lower, upper = LGD_FACTOR_BOUNDS
+    low_value, high_value = density(lower), density(upper)
+    attainable = min(low_value, high_value) - tol <= target_credit_density <= max(low_value, high_value) + tol
+    iterations = 0
+    if attainable:
+        lo, hi = lower, upper
+        for iterations in range(1, max_iter + 1):
+            factor = (lo + hi) / 2.0
+            achieved = density(factor)
+            if abs(achieved - target_credit_density) <= tol:
+                break
+            if (achieved < target_credit_density) == (low_value < high_value):
+                lo = factor
+            else:
+                hi = factor
+        factor = (lo + hi) / 2.0
+    else:
+        factor = lower if abs(low_value - target_credit_density) <= abs(high_value - target_credit_density) else upper
+    achieved = density(factor)
     return {
         "lgd_calibration_factor": float(factor),
         "target_credit_rwa_density": float(target_credit_density),
         "achieved_credit_rwa_density": float(achieved),
+        "initial_credit_rwa_density": float(density(1.0)),
+        "credit_rwa_density_residual": float(achieved - target_credit_density),
+        "lgd_factor_bounds": list(LGD_FACTOR_BOUNDS),
+        "credit_rwa_target_attainable": bool(attainable),
+        "credit_rwa_calibration_converged": bool(abs(achieved - target_credit_density) <= tol),
+        "credit_rwa_calibration_iterations": int(iterations),
+        "credit_rwa_calibration_adjusted_parameter": "ordinary LGD calibration scalar used by prototype RWA engine",
     }
 
 
-def apply_pd_calibration(ifrs9_df: pd.DataFrame, factor: float) -> pd.DataFrame:
+def apply_pd_calibration(
+    ifrs9_df: pd.DataFrame,
+    factor: float,
+    macro_conditions: Dict[str, float] | None = None,
+) -> pd.DataFrame:
     """Apply a PD calibration scalar to PIT/lifetime PDs and recompute ECL.
 
-    Staging is left unchanged (assigned from uncalibrated PDs); only the
-    provision level is re-anchored.
+    When macro conditions are supplied, recompute SICR stages after applying
+    the calibrated PDs and then recompute all dependent ECL columns.
     """
     df = ifrs9_df.copy()
     df["pit_pd_12m"] = np.clip(df["pit_pd_12m"].astype(float) * factor, 5e-5, 0.99)
     df["lifetime_pd"] = np.clip(df["lifetime_pd"].astype(float) * factor, 5e-5, 0.99)
     df["lifetime_pd"] = np.maximum(df["lifetime_pd"], df["pit_pd_12m"])
+    if macro_conditions is not None:
+        df = assign_ifrs9_staging(df, macro_conditions)
     return calculate_ecl(df)
 
 
 def calibrate_ecl_to_target(
     ifrs9_df: pd.DataFrame,
     target_ecl_ead_ratio: float,
+    macro_conditions: Dict[str, float] | None = None,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """Solve and apply the PD scalar so total ECL / EAD hits the benchmark
-    target (ECL is linear in PD)."""
+    """Solve and apply a bounded PD scalar against the configured ECL/EAD target.
+
+    With macro conditions, each trial recalculates staging; because stage
+    changes are discrete, the exact aggregate target may be unreachable.
+    """
     ead_total = float(ifrs9_df["ead"].sum())
     raw_ratio = float(ifrs9_df["ecl"].sum()) / max(ead_total, 1.0)
-    factor = float(np.clip(target_ecl_ead_ratio / max(raw_ratio, 1e-9), *PD_FACTOR_BOUNDS))
+    lower, upper = PD_FACTOR_BOUNDS
 
-    df = apply_pd_calibration(ifrs9_df, factor)
+    def achieved_at(candidate: float) -> float:
+        candidate_df = apply_pd_calibration(ifrs9_df, candidate, macro_conditions)
+        return float(candidate_df["ecl"].sum()) / max(ead_total, 1.0)
+
+    low_ratio, high_ratio = achieved_at(lower), achieved_at(upper)
+    attainable = min(low_ratio, high_ratio) <= target_ecl_ead_ratio <= max(low_ratio, high_ratio)
+    raw_factor = target_ecl_ead_ratio / max(raw_ratio, 1e-9)
+    candidates = [(lower, low_ratio), (upper, high_ratio)]
+    if attainable:
+        lo, hi = lower, upper
+        for _ in range(40):
+            midpoint = (lo + hi) / 2.0
+            ratio = achieved_at(midpoint)
+            candidates.append((midpoint, ratio))
+            if abs(ratio - target_ecl_ead_ratio) <= 1e-7:
+                break
+            if ratio < target_ecl_ead_ratio:
+                lo = midpoint
+            else:
+                hi = midpoint
+    factor, achieved = min(
+        candidates, key=lambda pair: abs(pair[1] - target_ecl_ead_ratio)
+    )
+    df = apply_pd_calibration(ifrs9_df, factor, macro_conditions)
     achieved = float(df["ecl"].sum()) / max(ead_total, 1.0)
     return df, {
         "pd_calibration_factor": factor,
+        "raw_pd_calibration_factor": float(raw_factor),
         "raw_ecl_ead_ratio": raw_ratio,
         "target_ecl_ead_ratio": float(target_ecl_ead_ratio),
         "achieved_ecl_ead_ratio": achieved,
+        "ecl_ead_ratio_residual": float(achieved - target_ecl_ead_ratio),
+        "pd_factor_bounds": list(PD_FACTOR_BOUNDS),
+        "ecl_target_attainable": bool(attainable),
+        "ecl_calibration_converged": bool(abs(achieved - target_ecl_ead_ratio) <= 1e-6),
+        "pd_calibration_adjusted_parameter": "PIT/lifetime PD scalar; staging recomputed when macro conditions are supplied",
     }
 
 

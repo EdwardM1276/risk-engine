@@ -13,8 +13,9 @@ def compute_afr_coverage_ratio(
     available_financial_resources: float,
     total_ecap_required: float,
     total_ecap_components: Dict[str, float],
+    resource_basis: str = "Illustrative benchmark-constructed resources; not actual bank AFR",
 ) -> Dict:
-    """Return AFR vs ECap coverage vs Nedbank 2024 170% benchmark."""
+    """Return proxy resource coverage; never imply actual bank AFR by default."""
     afr = float(available_financial_resources)
     req = float(total_ecap_required)
     coverage = afr / max(req, 1.0)
@@ -35,6 +36,8 @@ def compute_afr_coverage_ratio(
 
     return {
         "AFR": afr,
+        "AFR basis": resource_basis,
+        "is_actual_bank_afr": False,
         "Total ECap Required": req,
         "ECap Components": dict(total_ecap_components),
         "Coverage Ratio": float(coverage),

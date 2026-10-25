@@ -3,7 +3,7 @@ output floor mechanics, and stress-sensitive market/operational RWA."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict
 
 import numpy as np
@@ -178,25 +178,40 @@ def compute_operational_rwa(
     }
 
 
-def current_output_floor_pct(year: int | None = None) -> float:
-    """Output floor percentage under the phase-in schedule for a given year."""
-    y = int(year if year is not None else datetime.now().year)
+def current_output_floor_pct(as_of_date: date | str | None = None) -> float:
+    """Return the South African floor in force on ``as_of_date``.
+
+    A supplied date is essential for historical runs. ``None`` retains a
+    current-run convenience default for direct interactive use.
+    """
+    effective_date = (
+        date.fromisoformat(str(as_of_date)[:10])
+        if as_of_date is not None
+        else date.today()
+    )
     phase_in = OUTPUT_FLOOR["phase_in"]
-    years = sorted(phase_in)
-    if y <= years[0]:
-        return float(phase_in[years[0]])
-    if y >= years[-1]:
-        return float(phase_in[years[-1]])
-    return float(phase_in[y])
+    applicable = [
+        (date.fromisoformat(effective_from), float(pct))
+        for effective_from, pct in phase_in.items()
+        if date.fromisoformat(effective_from) <= effective_date
+    ]
+    if not applicable:
+        return float(OUTPUT_FLOOR["pre_implementation_pct"])
+    return max(applicable, key=lambda item: item[0])[1]
 
 
 def apply_output_floor(
     modelled_total_rwa: float,
     standardised_total_rwa: float,
     floor_pct: float | None = None,
+    as_of_date: date | str | None = None,
 ) -> Dict[str, float]:
-    """Basel III output floor: final RWA = max(modelled, floor_pct x standardised)."""
-    fp = float(floor_pct if floor_pct is not None else current_output_floor_pct())
+    """Apply the dated output-floor sensitivity proxy to supplied RWA totals."""
+    if modelled_total_rwa < 0 or standardised_total_rwa < 0:
+        raise ValueError("RWA inputs must be non-negative")
+    fp = float(floor_pct if floor_pct is not None else current_output_floor_pct(as_of_date))
+    if not 0.0 <= fp <= 1.0:
+        raise ValueError("floor_pct must be between 0 and 1")
     floor_rwa = fp * standardised_total_rwa
     final_rwa = max(modelled_total_rwa, floor_rwa)
     return {
@@ -215,6 +230,7 @@ def compute_total_rwa(
     macro_conditions: Dict[str, float] | None = None,
     bank_profile: str = DEFAULT_BANK_PROFILE,
     lgd_calibration_factor: float = 1.0,
+    as_of_date: date | str | None = None,
 ) -> Dict:
     """Compute total RWA: IRB credit + benchmark-composition market/op/other,
     with the Basel III output floor applied against the standardised total.
@@ -242,7 +258,7 @@ def compute_total_rwa(
     # Standardised total: standardised credit plus the same non-credit RWA
     # (market/operational are already standardised-style measures).
     standardised_total = sa_credit + market["market_rwa_total"] + op["operational_rwa"] + other_rwa
-    floor = apply_output_floor(modelled_total, standardised_total)
+    floor = apply_output_floor(modelled_total, standardised_total, as_of_date=as_of_date)
     total = floor["final_rwa"]
 
     ead_total = float(credit_df["ead"].sum())
@@ -251,7 +267,11 @@ def compute_total_rwa(
             "credit": "Basel III IRB Vasicek ASRF (UL-only, regulatory correlations)",
             "market": "Benchmark-composition scaling with FX/loadshedding stress",
             "operational": "Benchmark-composition scaling with disruption uplift",
-            "output_floor": f"max(modelled, {floor['floor_pct']:.1%} x standardised)",
+            "output_floor": (
+                f"Sensitivity proxy: max(modelled, {floor['floor_pct']:.1%} x incomplete standardised RWA)"
+            ),
+            "standardised_rwa_status": "Proxy; non-credit components are benchmark-scaled, not fully calculated",
+            "output_floor_effective_as_of": str(as_of_date) if as_of_date is not None else "system current date",
             "regulatory_use": "Prototype only; not a regulatory reporting calculation",
         },
         "bank_profile": bank_profile,

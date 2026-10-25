@@ -7,6 +7,9 @@ import pandas as pd
 
 from data.acquisition import (
     acquire_all_data,
+    fetch_eskom_loadshedding,
+    fetch_jse_market_data,
+    fetch_sarb_macro_data,
     fetch_uci_credit_card_defaults,
     fetch_world_bank_macro_data,
     normalize_fdic_portfolio,
@@ -16,9 +19,26 @@ from data.acquisition import (
 
 class AcquisitionTests(unittest.TestCase):
     def test_synthetic_mode_is_explicitly_labelled(self):
-        result = acquire_all_data(periods=3, n_accounts=20, data_source="synthetic")
+        result = acquire_all_data(
+            periods=3, n_accounts=20, data_source="synthetic",
+            as_of_date="2025-06-15",
+        )
         self.assertEqual(result.data_quality["data_source"], "synthetic")
         self.assertFalse(result.data_quality["synthetic_fallback_used"])
+        self.assertEqual(result.data_quality["status"], "REVIEW")
+        self.assertFalse(result.data_quality["validation_ready"])
+        self.assertEqual(result.timeseries["date"].max(), pd.Timestamp("2025-05-31"))
+        self.assertGreater(len(result.timeseries), 0)
+
+    def test_synthetic_series_use_aligned_historical_month_ends(self):
+        as_of = "2025-06-15"
+        macro = fetch_sarb_macro_data(periods=4, seed=19, as_of_date=as_of)
+        loadshedding = fetch_eskom_loadshedding(periods=4, seed=19, as_of_date=as_of)
+        markets = fetch_jse_market_data(periods=4, seed=19, as_of_date=as_of)
+        self.assertEqual(macro["date"].tolist(), loadshedding["date"].tolist())
+        self.assertEqual(macro["date"].tolist(), markets["date"].tolist())
+        self.assertTrue((macro["date"] <= pd.Timestamp(as_of)).all())
+        self.assertTrue(macro["date"].dt.is_month_end.all())
 
     def test_invalid_source_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -88,11 +108,12 @@ class AcquisitionTests(unittest.TestCase):
             return [{}, [{"date": "2024", "value": values[indicator]}]]
 
         with patch("data.acquisition._get_json", side_effect=response):
-            result = fetch_world_bank_macro_data(periods=1)
+            result = fetch_world_bank_macro_data(periods=1, as_of_date="2024-12-31")
 
         self.assertAlmostEqual(result.loc[0, "gdp_yoy"], 0.02)
         self.assertAlmostEqual(result.loc[0, "cpi_yoy"], 0.05)
         self.assertAlmostEqual(result.loc[0, "unemployment_rate"], 0.30)
+        self.assertLessEqual(result.loc[0, "date"], pd.Timestamp("2024-12-31"))
 
     def test_uci_credit_defaults_parser_preserves_observed_outcomes(self):
         source = pd.DataFrame([{
